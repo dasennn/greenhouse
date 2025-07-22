@@ -1,41 +1,54 @@
-# ui/main_window.py
-from PySide6.QtWidgets import QMainWindow, QGraphicsView, QGraphicsScene, QWidget, QVBoxLayout
-from PySide6.QtGui import QPen, QPolygonF
-from PySide6.QtCore import Qt, QPointF
+from PySide6.QtWidgets import QMainWindow, QToolBar
+from PySide6.QtGui import QAction
+from .drawing_view import DrawingView
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Greenhouse Builder")
-        self._pts = []  # list of QPointF
+        self.setWindowTitle("Greenhouse Estimator")
+        self.view = DrawingView()
+        self.setCentralWidget(self.view)
+        self.resize(800, 600)
+        self._create_toolbar()
 
-        # Scene & View
-        self.scene = QGraphicsScene()
-        self.view = QGraphicsView(self.scene)
-        self.view.setRenderHint(self.view.renderHints() | Qt.Antialiasing)
-        self.view.setDragMode(QGraphicsView.NoDrag)
+    def _create_toolbar(self):
+        toolbar = QToolBar("Tools", self)
+        self.addToolBar(toolbar)
 
-        # Layout
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.addWidget(self.view)
-        self.setCentralWidget(container)
+        # Core actions: (label, handler, is_checkable)
+        actions = [
+            ("Free Draw",       self.view.toggle_free_mode,  True),
+            ("Undo",            self.view.undo,              False),
+            ("Redo",            self.view.redo,              False),
+            ("Clear All",       self.view.clear,             False),
+            ("Grid Spacing",    self.view.change_grid,       False),
+            ("Grid+",           self.view.increase_grid,     False),
+            ("Grid-",           self.view.decrease_grid,     False),
+            ("Close Perimeter", self._close_perimeter,       False),
+        ]
+        for text, handler, checkable in actions:
+            act = QAction(text, self)
+            if checkable:
+                act.setCheckable(True)
+                act.toggled.connect(handler)
+            else:
+                act.triggered.connect(handler)
+            toolbar.addAction(act)
 
-    def mousePressEvent(self, event):
-        # Map window click to scene coords
-        if event.button() == Qt.LeftButton:
-            pos = self.view.mapToScene(event.pos())
-            self._pts.append(QPointF(pos))
-            self._redraw_polygon()
+        # Guide Lines toggle
+        guide_act = QAction("Guide Lines", self)
+        guide_act.setCheckable(True)
+        guide_act.toggled.connect(self.view.toggle_guide_mode)
+        toolbar.addAction(guide_act)
 
-    def _redraw_polygon(self):
-        self.scene.clear()
-        pen = QPen(Qt.blue, 2)
-        if len(self._pts) > 1:
-            poly = QPolygonF(self._pts)
-            self.scene.addPolygon(poly, pen)
-        # Draw points
-        for p in self._pts:
-            self.scene.addEllipse(p.x()-2, p.y()-2, 4, 4, pen)
+        # Erase Guides button
+        erase_act = QAction("Erase Guides", self)
+        erase_act.triggered.connect(self.view.erase_guides)
+        toolbar.addAction(erase_act)
 
-    # (Later: add keyPressEvent for undo, right-click to close polygon, etc.)
+    def _close_perimeter(self):
+        if len(self.view.points) >= 3:
+            self.view.save_perimeter_state()
+            # close the loop
+            self.view.points.append(self.view.points[0])
+            self.view._refresh()
