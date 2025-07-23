@@ -1,10 +1,10 @@
+# src/ui/drawing_view.py
 from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene,
     QGraphicsSimpleTextItem, QInputDialog,
     QGraphicsEllipseItem, QGraphicsLineItem,
-    QGraphicsPathItem
+    QGraphicsPathItem, QGraphicsBlurEffect, QGraphicsTextItem
 )
-from PySide6.QtWidgets import QGraphicsBlurEffect
 from PySide6.QtGui import QPainter, QPainterPath, QPen, QColor, QCursor, QBrush
 from PySide6.QtCore import Qt, QPointF, QRectF
 
@@ -33,10 +33,8 @@ class DrawingView(QGraphicsView):
         self.guides        = []      # list of (start_pt, end_pt)
         self.guide_items   = []
         self.guide_labels  = []
-        self.guide_history = []
+        self.guide_history = [[]]    # seed with empty state
         self.guide_future  = []
-        # seed initial empty‐guide state for undo
-        self.guide_history.append(list(self.guides))
 
         # ─── Perimeter path & markers ──────────────────────────
         pen = QPen(QColor("green"), 2)
@@ -53,6 +51,18 @@ class DrawingView(QGraphicsView):
         self.snap_marker.setZValue(2)
         self.scene.addItem(self.snap_marker)
         self.snap_marker.hide()
+
+        # ─── Preview line & label ──────────────────────────────
+        self.preview_line = QGraphicsLineItem()
+        self.preview_line.setPen(QPen(QColor("green"), 1, Qt.DashLine))
+        self.preview_line.setZValue(1.5)
+        self.scene.addItem(self.preview_line)
+        self.preview_line.hide()
+
+        self.preview_label = QGraphicsTextItem()
+        self.preview_label.setZValue(1.5)
+        self.scene.addItem(self.preview_label)
+        self.preview_label.hide()
 
         # ─── Panning ───────────────────────────────────────────
         self._panning   = False
@@ -89,8 +99,7 @@ class DrawingView(QGraphicsView):
 
     def change_grid(self):
         m, ok = QInputDialog.getDouble(
-            self, "Grid Spacing",
-            "Enter grid spacing (meters):",
+            self, "Grid Spacing", "Enter grid spacing (meters):",
             self.grid_meters, 0.01, 100.0, 2
         )
         if ok:
@@ -140,7 +149,7 @@ class DrawingView(QGraphicsView):
         self.guides = self.guide_future.pop()
         self._refresh_guides()
 
-    # ─── UNIFIED for toolbar/shortcuts ─────────────────────────────────
+    # ─── UNIFIED undo/redo ─────────────────────────────────────────────
     def undo(self):
         if self.guide_enabled:
             self.undo_guide()
@@ -176,7 +185,6 @@ class DrawingView(QGraphicsView):
                 path.lineTo(p)
         self.path_item.setPath(path)
 
-        # clear old
         for m in self.point_items:
             self.scene.removeItem(m)
         for l in self.length_items:
@@ -184,9 +192,7 @@ class DrawingView(QGraphicsView):
         self.point_items.clear()
         self.length_items.clear()
 
-        # draw new
         for i, pt in enumerate(self.points):
-            # dot
             r = 3
             dot = QGraphicsEllipseItem(pt.x()-r, pt.y()-r, 2*r, 2*r)
             dot.setBrush(QColor("black"))
@@ -194,13 +200,11 @@ class DrawingView(QGraphicsView):
             dot.setZValue(1)
             self.scene.addItem(dot)
             self.point_items.append(dot)
-            # length label
             if i > 0:
                 self._add_length_label(self.points[i-1], pt)
 
     # ─── REDRAW GUIDES ─────────────────────────────────────────────────
     def _refresh_guides(self):
-        # clear old
         for itm in self.guide_items:
             self.scene.removeItem(itm)
         for lbl in self.guide_labels:
@@ -208,10 +212,8 @@ class DrawingView(QGraphicsView):
         self.guide_items.clear()
         self.guide_labels.clear()
 
-        # redraw
         for start, end in self.guides:
-            line = QGraphicsLineItem(start.x(), start.y(),
-                                     end.x(),   end.y())
+            line = QGraphicsLineItem(start.x(), start.y(), end.x(), end.y())
             pen  = QPen(QColor("red"), 1, Qt.SolidLine)
             line.setPen(pen)
             self.scene.addItem(line)
@@ -227,52 +229,43 @@ class DrawingView(QGraphicsView):
 
     # ─── MOUSE EVENTS ──────────────────────────────────────────────────
     def mousePressEvent(self, event):
-        # panning
+        # Panning
         if event.button() == Qt.MiddleButton:
             self._panning   = True
             self._pan_start = event.pos()
             self.setCursor(Qt.ClosedHandCursor)
             return
 
-        # guide-mode: save state before adding a new guide
+        # Guide-mode
         if event.button() == Qt.LeftButton and self.guide_enabled:
             scene_p = self.mapToScene(event.pos())
             snap_p  = self.snap_to_grid(scene_p)
             if self._guide_start is None:
                 self._guide_start = snap_p
             else:
-                # snapshot _before_ mutating
                 self.save_guide_state()
-
                 sx, sy = self._guide_start.x(), self._guide_start.y()
                 dx, dy = snap_p.x()-sx, snap_p.y()-sy
                 if abs(dy) > abs(dx):
-                    # vertical
                     x      = sx
                     y0, y1 = sorted([sy, snap_p.y()])
                     start, end = QPointF(x, y0), QPointF(x, y1)
                 else:
-                    # horizontal
                     y      = sy
                     x0, x1 = sorted([sx, snap_p.x()])
                     start, end = QPointF(x0, y), QPointF(x1, y)
-
-                # draw red guide
                 pen  = QPen(QColor("red"), 1, Qt.SolidLine)
-                line = QGraphicsLineItem(start.x(), start.y(),
-                                         end.x(),   end.y())
+                line = QGraphicsLineItem(start.x(), start.y(), end.x(), end.y())
                 line.setPen(pen)
                 self.scene.addItem(line)
-
                 self.guides.append((start, end))
                 self.guide_items.append(line)
                 lbl = self._add_guide_length_label(start, end)
                 self.guide_labels.append(lbl)
-
                 self._guide_start = None
             return
 
-        # perimeter-mode
+        # Perimeter-mode
         if event.button() == Qt.LeftButton:
             scene_p = self.mapToScene(event.pos())
             pt      = self.snap_to_grid(scene_p)
@@ -284,8 +277,6 @@ class DrawingView(QGraphicsView):
                         pt = QPointF(pt.x(), last.y())
                     else:
                         pt = QPointF(last.x(), pt.y())
-
-            # snapshot _before_ appending
             self.save_perimeter_state()
             self.points.append(pt)
             self._refresh()
@@ -294,22 +285,57 @@ class DrawingView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        # snap marker
+        # 1) snap-marker
         scene_p = self.mapToScene(event.pos())
         snap_p  = self.snap_to_grid(scene_p)
         self.snap_marker.setRect(snap_p.x()-5, snap_p.y()-5, 10, 10)
         self.snap_marker.show()
 
-        # panning
-        if self._panning:
-            delta = event.pos() - self._pan_start
+        # 2) preview
+        preview = False
+        if self.guide_enabled and self._guide_start is not None:
+            start = self._guide_start
+            dx, dy = snap_p.x()-start.x(), snap_p.y()-start.y()
+            if abs(dy) > abs(dx):
+                end = QPointF(start.x(), snap_p.y())
+            else:
+                end = QPointF(snap_p.x(), start.y())
+            pen = QPen(QColor("red"), 1, Qt.DashLine)
+            preview = True
+        elif not self.guide_enabled and self.points:
+            start = self.points[-1]
+            dx, dy = snap_p.x()-start.x(), snap_p.y()-start.y()
+            if not self.free_mode:
+                if abs(dx) > abs(dy):
+                    end = QPointF(snap_p.x(), start.y())
+                else:
+                    end = QPointF(start.x(), snap_p.y())
+            else:
+                end = snap_p
+            pen = QPen(QColor("green"), 1, Qt.DashLine)
+            preview = True
+
+        if preview:
+            self.preview_line.setPen(pen)
+            self.preview_line.setLine(start.x(), start.y(), end.x(), end.y())
+            self.preview_line.show()
+            dist_m = ((end.x()-start.x())**2 + (end.y()-start.y())**2)**0.5 / self.scale_factor
+            mid = QPointF((start.x()+end.x())/2, (start.y()+end.y())/2)
+            color = QColor("red") if self.guide_enabled else QColor("green")
+            self.preview_label.setDefaultTextColor(color)
+            self.preview_label.setPlainText(f"{dist_m:.2f} m")
+            self.preview_label.setPos(mid)
+            self.preview_label.show()
+        else:
+            self.preview_line.hide()
+            self.preview_label.hide()
+
+        # 3) panning
+        if getattr(self, '_panning', False):
+            d = event.pos() - self._pan_start
             self._pan_start = event.pos()
-            self.horizontalScrollBar().setValue(
-                self.horizontalScrollBar().value() - int(delta.x())
-            )
-            self.verticalScrollBar().setValue(
-                self.verticalScrollBar().value() - int(delta.y())
-            )
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(d.x()))
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(d.y()))
             return
 
         super().mouseMoveEvent(event)
@@ -329,21 +355,18 @@ class DrawingView(QGraphicsView):
             if event.key() == Qt.Key_Y:
                 self.redo(); return
 
-        # grid +/- 
+        # grid shortcuts
         if event.key() in (Qt.Key_Plus, Qt.Key_Equal):
             self.increase_grid(); return
         if event.key() == Qt.Key_Minus:
             self.decrease_grid(); return
 
-        # Enter: length prompt
+        # enter length prompt
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            if self.guide_enabled:
-                if self._guide_start is not None:
-                    self.prompt_guide_length_input()
-                return
+            if self.guide_enabled and self._guide_start is not None:
+                self.prompt_guide_length_input(); return
             if self.points:
-                self.prompt_length_input()
-                return
+                self.prompt_length_input(); return
 
         super().keyPressEvent(event)
 
@@ -359,10 +382,12 @@ class DrawingView(QGraphicsView):
         cursor_p = self.mapToScene(self.mapFromGlobal(QCursor.pos()))
         dx, dy   = cursor_p.x()-last.x(), cursor_p.y()-last.y()
         if self.free_mode:
+            # vector direction
             norm = (dx*dx + dy*dy)**0.5
             if norm == 0: return
             ux, uy = dx/norm, dy/norm
         else:
+            # axis constrained
             if abs(dx) > abs(dy):
                 ux, uy = (1 if dx>0 else -1), 0
             else:
