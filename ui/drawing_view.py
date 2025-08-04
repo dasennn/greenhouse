@@ -1,58 +1,94 @@
-# src/ui/drawing_view.py
+from typing import Optional
+import math
 from PySide6.QtWidgets import (
-    QGraphicsView, QGraphicsScene,
-    QGraphicsSimpleTextItem, QInputDialog,
-    QGraphicsEllipseItem, QGraphicsLineItem,
-    QGraphicsPathItem, QGraphicsBlurEffect, QGraphicsTextItem
+    QGraphicsView,
+    QGraphicsScene,
+    QGraphicsItem,
+    QGraphicsEllipseItem,
+    QGraphicsLineItem,
+    QGraphicsTextItem,
+    QGraphicsSimpleTextItem,
+    QInputDialog,
+    QMainWindow,
 )
-from PySide6.QtGui import QPainter, QPainterPath, QPen, QColor, QCursor, QBrush
+from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QAction
 from PySide6.QtCore import Qt, QPointF, QRectF
+
+class DraggablePoint(QGraphicsEllipseItem):
+    def __init__(self, view, index, pos):
+        super().__init__(-3, -3, 6, 6)
+        self.view = view
+        self.index = index
+        self.setBrush(QColor("black"))
+        self.setPen(Qt.NoPen)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        self.setZValue(1)
+        self.setPos(pos)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemPositionChange:
+            # Update the data model while dragging
+            new_pos = value
+            self.view.points[self.index] = new_pos
+        return super().itemChange(change, value)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        self.view.save_state()
+        self.view._refresh_perimeter()
+
 
 class DrawingView(QGraphicsView):
     def __init__(self, parent=None):
         super().__init__(parent)
-        # ─── Scene & view setup ─────────────────────────────
         self.scene = QGraphicsScene(-2000, -2000, 4000, 4000, self)
         self.setScene(self.scene)
         self.setMouseTracking(True)
-        self.setCursor(Qt.CrossCursor)
-        self.setDragMode(QGraphicsView.NoDrag)
+        self.setDragMode(QGraphicsView.RubberBandDrag)
+        self.setCursor(Qt.ArrowCursor)
 
-        # ─── Perimeter state & history ────────────────────────
-        self.points        = []
-        self.free_mode     = False
-        self.scale_factor  = 100     # px per meter
-        self.grid_meters   = 0.1     # default 0.1 m
-        self.grid_size     = self.grid_meters * self.scale_factor
-        self.perim_history = []
-        self.perim_future  = []
+        # Grid & zoom
+        self.scale_factor = 5   # pixels per meter
+        self.grid_meters  = 0.1
+        self.grid_size    = self.grid_meters * self.scale_factor
 
-        # ─── Guide state & history ────────────────────────────
-        self.guide_enabled = False
+        # Snapping
+        self.osnap_enabled = True
+        self.snap_tol_px   = 10
+
+        # Modes
+        self.pointer_enabled  = True
+        self.polyline_enabled = False
+        self.guide_enabled    = False
+        self.pan_enabled      = False
+        self.free_mode        = False
+
+        # Drawing state
+        self.points        = []      # list of QPointF
+        self.perim_items   = []      # QGraphicsLineItem
+        self.point_items   = []      # DraggablePoint
+        self.length_items  = []      # QGraphicsSimpleTextItem
+
         self._guide_start  = None
-        self.guides        = []      # list of (start_pt, end_pt)
-        self.guide_items   = []
-        self.guide_labels  = []
-        self.guide_history = [[]]    # seed with empty state
-        self.guide_future  = []
+        self.guides        = []      # list of (start,end)
+        self.guide_items   = []      # QGraphicsLineItem
+        self.guide_labels  = []      # QGraphicsSimpleTextItem
 
-        # ─── Perimeter path & markers ──────────────────────────
-        pen = QPen(QColor("green"), 2)
-        self.path_item = QGraphicsPathItem()
-        self.path_item.setPen(pen)
-        self.scene.addItem(self.path_item)
-        self.length_items = []
-        self.point_items  = []
+        # Global undo/redo stack
+        self.history = []
+        self.future = []
 
-        # ─── Snap-marker ───────────────────────────────────────
+        # Snap marker
         self.snap_marker = QGraphicsEllipseItem(-5, -5, 10, 10)
-        self.snap_marker.setPen(QPen(QColor("red"), 2))
+        self.snap_marker.setPen(QPen(QColor("yellow"), 2))
         self.snap_marker.setBrush(Qt.NoBrush)
         self.snap_marker.setZValue(2)
         self.scene.addItem(self.snap_marker)
         self.snap_marker.hide()
 
-        # ─── Preview line & label ──────────────────────────────
+        # Preview line & label
         self.preview_line = QGraphicsLineItem()
         self.preview_line.setPen(QPen(QColor("green"), 1, Qt.DashLine))
         self.preview_line.setZValue(1.5)
@@ -64,24 +100,66 @@ class DrawingView(QGraphicsView):
         self.scene.addItem(self.preview_label)
         self.preview_label.hide()
 
-        # ─── Panning ───────────────────────────────────────────
+        # Panning
         self._panning   = False
         self._pan_start = QPointF()
 
-    # ─── GRID & ZOOM ────────────────────────────────────────────────────
+        # Initialize undo stack
+        self.save_state()
+
+    def save_state(self):
+        # Save a deep copy of BOTH perimeter and guide state
+        state = {
+            "points": list(self.points),
+            "guides": list(self.guides),
+        }
+        self.history.append(state)
+        self.future.clear()
+
+    def restore_state(self, state):
+        self.points = list(state["points"])
+        self.guides = list(state["guides"])
+        self._refresh_perimeter()
+        self._refresh_guides()
+
+    def undo(self):
+        if len(self.history) < 2:
+            return
+        self.future.append(self.history.pop())
+        self.restore_state(self.history[-1])
+
+    def redo(self):
+        if not self.future:
+            return
+        state = self.future.pop()
+        self.history.append(state)
+        self.restore_state(state)
+
     def drawBackground(self, painter: QPainter, rect: QRectF):
         pen = QPen(QColor(220, 220, 220), 1)
         painter.setPen(pen)
-        left = int(rect.left() / self.grid_size) * self.grid_size
-        top  = int(rect.top()  / self.grid_size) * self.grid_size
+        # Greenhouse grid: 5m between columns (vertical), 3m between rows (horizontal)
+        grid_x = 5 * self.scale_factor  # 5 meters horizontally (columns)
+        grid_y = 3 * self.scale_factor  # 3 meters vertically (rows)
+
+        # Find first vertical and horizontal grid line in view
+        left = int(rect.left() / grid_x) * grid_x
+        right = rect.right()
+        top = int(rect.top() / grid_y) * grid_y
+        bottom = rect.bottom()
+
+        # Draw vertical grid lines (columns every 5m)
         x = left
-        while x < rect.right():
+        while x < right:
             painter.drawLine(x, rect.top(), x, rect.bottom())
-            x += self.grid_size
+            x += grid_x
+
+        # Draw horizontal grid lines (rows every 3m)
         y = top
-        while y < rect.bottom():
+        while y < bottom:
             painter.drawLine(rect.left(), y, rect.right(), y)
-            y += self.grid_size
+            y += grid_y
+
 
     def wheelEvent(self, event):
         factor = 1.2 if event.angleDelta().y() > 0 else 0.8
@@ -107,347 +185,398 @@ class DrawingView(QGraphicsView):
             self.grid_size   = m * self.scale_factor
             self.viewport().update()
 
-    # ─── MODE TOGGLES ─────────────────────────────────────────────────
-    def toggle_free_mode(self, on: bool):
-        self.free_mode = on
+    def toggle_osnap_mode(self, on: bool):
+        self.osnap_enabled = on
+        color = "yellow" if on else "red"
+        self.snap_marker.setPen(QPen(QColor(color), 2))
+
+    def toggle_pointer_mode(self, on: bool):
+        self.pointer_enabled = on
+        if on:
+            self.polyline_enabled = False
+            self.guide_enabled    = False
+            self.pan_enabled      = False
+            self.setDragMode(QGraphicsView.RubberBandDrag)
+            self.setCursor(Qt.ArrowCursor)
+        else:
+            self.setDragMode(QGraphicsView.NoDrag)
+
+    def toggle_polyline_mode(self, on: bool):
+        self.polyline_enabled = on
+        if on:
+            self.pointer_enabled = False
+            self.guide_enabled   = False
+            self.pan_enabled     = False
+            self.setCursor(Qt.CrossCursor)
+        else:
+            self.setCursor(Qt.ArrowCursor)
 
     def toggle_guide_mode(self, on: bool):
         self.guide_enabled = on
         self._guide_start  = None
-
-    # ─── PERIMETER HISTORY ────────────────────────────────────────────
-    def save_perimeter_state(self):
-        self.perim_history.append(list(self.points))
-        self.perim_future.clear()
-
-    def undo_perimeter(self):
-        if not self.perim_history: return
-        self.perim_future.append(list(self.points))
-        self.points = self.perim_history.pop()
-        self._refresh()
-
-    def redo_perimeter(self):
-        if not self.perim_future: return
-        self.perim_history.append(list(self.points))
-        self.points = self.perim_future.pop()
-        self._refresh()
-
-    # ─── GUIDE HISTORY ────────────────────────────────────────────────
-    def save_guide_state(self):
-        self.guide_history.append(list(self.guides))
-        self.guide_future.clear()
-
-    def undo_guide(self):
-        if not self.guide_history: return
-        self.guide_future.append(list(self.guides))
-        self.guides = self.guide_history.pop()
-        self._refresh_guides()
-
-    def redo_guide(self):
-        if not self.guide_future: return
-        self.guide_history.append(list(self.guides))
-        self.guides = self.guide_future.pop()
-        self._refresh_guides()
-
-    # ─── UNIFIED undo/redo ─────────────────────────────────────────────
-    def undo(self):
-        if self.guide_enabled:
-            self.undo_guide()
+        if on:
+            self.pointer_enabled  = False
+            self.polyline_enabled = False
+            self.pan_enabled      = False
+            self.setCursor(Qt.CrossCursor)
         else:
-            self.undo_perimeter()
+            self.setCursor(Qt.ArrowCursor)
 
-    def redo(self):
-        if self.guide_enabled:
-            self.redo_guide()
+    def toggle_pan_mode(self, on: bool):
+        self.pan_enabled = on
+        if on:
+            self.pointer_enabled  = False
+            self.polyline_enabled = False
+            self.guide_enabled    = False
+            self.setDragMode(QGraphicsView.ScrollHandDrag)
+            self.setCursor(Qt.OpenHandCursor)
         else:
-            self.redo_perimeter()
+            self.toggle_pointer_mode(True)
 
-    # ─── CLEAR / ERASE ─────────────────────────────────────────────────
-    def clear(self):
-        self.save_perimeter_state()
-        self.points.clear()
-        self._refresh()
-
-    def erase_guides(self):
-        self.save_guide_state()
-        for itm in self.guide_items + self.guide_labels:
-            self.scene.removeItem(itm)
-        self.guide_items.clear()
-        self.guides.clear()
-        self.guide_labels.clear()
-
-    # ─── REDRAW PERIMETER ───────────────────────────────────────────────
-    def _refresh(self):
-        path = QPainterPath()
-        if self.points:
-            path.moveTo(self.points[0])
-            for p in self.points[1:]:
-                path.lineTo(p)
-        self.path_item.setPath(path)
-
-        for m in self.point_items:
-            self.scene.removeItem(m)
-        for l in self.length_items:
-            self.scene.removeItem(l)
-        self.point_items.clear()
-        self.length_items.clear()
-
-        for i, pt in enumerate(self.points):
-            r = 3
-            dot = QGraphicsEllipseItem(pt.x()-r, pt.y()-r, 2*r, 2*r)
-            dot.setBrush(QColor("black"))
-            dot.setPen(QPen(Qt.NoPen))
-            dot.setZValue(1)
-            self.scene.addItem(dot)
-            self.point_items.append(dot)
-            if i > 0:
-                self._add_length_label(self.points[i-1], pt)
-
-    # ─── REDRAW GUIDES ─────────────────────────────────────────────────
-    def _refresh_guides(self):
-        for itm in self.guide_items:
-            self.scene.removeItem(itm)
-        for lbl in self.guide_labels:
-            self.scene.removeItem(lbl)
-        self.guide_items.clear()
-        self.guide_labels.clear()
-
-        for start, end in self.guides:
-            line = QGraphicsLineItem(start.x(), start.y(), end.x(), end.y())
-            pen  = QPen(QColor("red"), 1, Qt.SolidLine)
-            line.setPen(pen)
-            self.scene.addItem(line)
-            self.guide_items.append(line)
-            lbl = self._add_guide_length_label(start, end)
-            self.guide_labels.append(lbl)
-
-    # ─── UTILITY ───────────────────────────────────────────────────────
-    def snap_to_grid(self, pos: QPointF) -> QPointF:
-        x = round(pos.x() / self.grid_size) * self.grid_size
-        y = round(pos.y() / self.grid_size) * self.grid_size
+    def snap_to_greenhouse_grid(self, scene_p: QPointF) -> QPointF:
+        grid_x = 5 * self.scale_factor
+        grid_y = 3 * self.scale_factor
+        x = round(scene_p.x() / grid_x) * grid_x
+        y = round(scene_p.y() / grid_y) * grid_y
         return QPointF(x, y)
 
-    # ─── MOUSE EVENTS ──────────────────────────────────────────────────
+    def snap_to_greenhouse_grid_or_edge_mid_if_close(self, scene_p: QPointF, view_p: QPointF, snap_tol_px=12):
+        grid_x = 5 * self.scale_factor
+        grid_y = 3 * self.scale_factor
+
+        # Nearest grid intersection
+        gx = round(scene_p.x() / grid_x) * grid_x
+        gy = round(scene_p.y() / grid_y) * grid_y
+        grid_pt = QPointF(gx, gy)
+        grid_vp = self.mapFromScene(grid_pt)
+        dist_grid = (grid_vp.x() - view_p.x()) ** 2 + (grid_vp.y() - view_p.y()) ** 2
+
+        # Midpoint on vertical grid line (halfway in y, x on grid)
+        mx_v = gx
+        my_v = (round(scene_p.y() / grid_y - 0.5) + 0.5) * grid_y
+        vert_mid_pt = QPointF(mx_v, my_v)
+        vert_mid_vp = self.mapFromScene(vert_mid_pt)
+        dist_vert_mid = (vert_mid_vp.x() - view_p.x()) ** 2 + (vert_mid_vp.y() - view_p.y()) ** 2
+
+        # Midpoint on horizontal grid line (halfway in x, y on grid)
+        mx_h = (round(scene_p.x() / grid_x - 0.5) + 0.5) * grid_x
+        my_h = gy
+        horiz_mid_pt = QPointF(mx_h, my_h)
+        horiz_mid_vp = self.mapFromScene(horiz_mid_pt)
+        dist_horiz_mid = (horiz_mid_vp.x() - view_p.x()) ** 2 + (horiz_mid_vp.y() - view_p.y()) ** 2
+
+        # Find closest candidate
+        min_dist = min(dist_grid, dist_vert_mid, dist_horiz_mid)
+        if min_dist <= snap_tol_px ** 2:
+            if min_dist == dist_grid:
+                return grid_pt, "grid"
+            else:
+                # "mid" for both edge cases, both will show blue
+                if min_dist == dist_vert_mid:
+                    return vert_mid_pt, "mid"
+                else:
+                    return horiz_mid_pt, "mid"
+        else:
+            return scene_p, None
+
     def mousePressEvent(self, event):
-        # Panning
+        # Middle-button drag starts panning
         if event.button() == Qt.MiddleButton:
-            self._panning   = True
+            self._panning = True
             self._pan_start = event.pos()
             self.setCursor(Qt.ClosedHandCursor)
             return
 
-        # Guide-mode
-        if event.button() == Qt.LeftButton and self.guide_enabled:
-            scene_p = self.mapToScene(event.pos())
-            snap_p  = self.snap_to_grid(scene_p)
+        view_p = event.pos()
+        scene_p = self.mapToScene(view_p)
+        snap_pt, snap_type = self.snap_to_greenhouse_grid_or_edge_mid_if_close(scene_p, view_p)
+
+        grid_x = 5 * self.scale_factor
+        grid_y = 3 * self.scale_factor
+        nearest_grid = QPointF(
+            round(scene_p.x() / grid_x) * grid_x,
+            round(scene_p.y() / grid_y) * grid_y
+        )
+
+        if snap_type == "grid":
+            marker_pt = snap_pt
+            color = "red"
+        elif snap_type == "mid":
+            marker_pt = snap_pt
+            color = "blue"
+        else:
+            marker_pt = nearest_grid
+            color = "gray"
+
+        self.snap_marker.setPen(QPen(QColor(color), 3))
+        self.snap_marker.setRect(marker_pt.x() - 7, marker_pt.y() - 7, 14, 14)
+        self.snap_marker.show()
+
+
+        if self.pointer_enabled and event.button() == Qt.LeftButton:
+            return super().mousePressEvent(event)
+
+        # Guide-line mode
+        if self.guide_enabled and event.button() == Qt.LeftButton:
             if self._guide_start is None:
-                self._guide_start = snap_p
+                self._guide_start = snap_pt
             else:
-                self.save_guide_state()
-                sx, sy = self._guide_start.x(), self._guide_start.y()
-                dx, dy = snap_p.x()-sx, snap_p.y()-sy
-                if abs(dy) > abs(dx):
-                    x      = sx
-                    y0, y1 = sorted([sy, snap_p.y()])
-                    start, end = QPointF(x, y0), QPointF(x, y1)
+                s, e = self._guide_start, snap_pt
+                if abs(e.y() - s.y()) > abs(e.x() - s.x()):
+                    e = QPointF(s.x(), e.y())
                 else:
-                    y      = sy
-                    x0, x1 = sorted([sx, snap_p.x()])
-                    start, end = QPointF(x0, y), QPointF(x1, y)
-                pen  = QPen(QColor("red"), 1, Qt.SolidLine)
-                line = QGraphicsLineItem(start.x(), start.y(), end.x(), end.y())
-                line.setPen(pen)
-                self.scene.addItem(line)
-                self.guides.append((start, end))
-                self.guide_items.append(line)
-                lbl = self._add_guide_length_label(start, end)
-                self.guide_labels.append(lbl)
+                    e = QPointF(e.x(), s.y())
+                self.guides.append((s, e))
+                self.save_state()
                 self._guide_start = None
+                self._refresh_guides()
             return
 
-        # Perimeter-mode
-        if event.button() == Qt.LeftButton:
-            scene_p = self.mapToScene(event.pos())
-            pt      = self.snap_to_grid(scene_p)
-            if self.points:
-                last = self.points[-1]
+        # Polyline mode: axis‐locked by default, free‐angle with Shift
+        if self.polyline_enabled and event.button() == Qt.LeftButton:
+            self.free_mode = bool(event.modifiers() & Qt.ShiftModifier)
+            raw_pt = snap_pt
+            alt_held = bool(event.modifiers() & Qt.AltModifier)
+
+            if not self.points:
+                self.points.append(raw_pt)
+                self.save_state()
+            else:
+                ref = self.points[0] if alt_held else self.points[-1]
                 if not self.free_mode:
-                    dx, dy = pt.x()-last.x(), pt.y()-last.y()
+                    dx, dy = raw_pt.x() - ref.x(), raw_pt.y() - ref.y()
                     if abs(dx) > abs(dy):
-                        pt = QPointF(pt.x(), last.y())
+                        new_pt = QPointF(raw_pt.x(), ref.y())
                     else:
-                        pt = QPointF(last.x(), pt.y())
-            self.save_perimeter_state()
-            self.points.append(pt)
-            self._refresh()
+                        new_pt = QPointF(ref.x(), raw_pt.y())
+                else:
+                    new_pt = raw_pt
+
+                if alt_held:
+                    self.points.insert(0, new_pt)
+                else:
+                    self.points.append(new_pt)
+                self.save_state()
+
+            self.preview_line.hide()
+            self.preview_label.hide()
+            self._refresh_perimeter()
             return
 
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        # 1) snap-marker
-        scene_p = self.mapToScene(event.pos())
-        snap_p  = self.snap_to_grid(scene_p)
-        self.snap_marker.setRect(snap_p.x()-5, snap_p.y()-5, 10, 10)
+        # Handle panning
+        if self._panning:
+            d = event.pos() - self._pan_start
+            self._pan_start = event.pos()
+            self.horizontalScrollBar().setValue(
+                self.horizontalScrollBar().value() - int(d.x()))
+            self.verticalScrollBar().setValue(
+                self.verticalScrollBar().value() - int(d.y()))
+            return
+
+        view_p = event.pos()
+        scene_p = self.mapToScene(view_p)
+        snap_pt, snap_type = self.snap_to_greenhouse_grid_or_edge_mid_if_close(scene_p, view_p)
+
+        grid_x = 5 * self.scale_factor
+        grid_y = 3 * self.scale_factor
+        nearest_grid = QPointF(
+            round(scene_p.x() / grid_x) * grid_x,
+            round(scene_p.y() / grid_y) * grid_y
+        )
+
+        if snap_type == "grid":
+            marker_pt = snap_pt
+            color = "red"
+        elif snap_type == "mid":
+            marker_pt = snap_pt
+            color = "blue"
+        else:
+            marker_pt = nearest_grid
+            color = "gray"
+
+        self.snap_marker.setPen(QPen(QColor(color), 3))
+        self.snap_marker.setRect(marker_pt.x() - 7, marker_pt.y() - 7, 14, 14)
         self.snap_marker.show()
 
-        # 2) preview
-        preview = False
-        if self.guide_enabled and self._guide_start is not None:
-            start = self._guide_start
-            dx, dy = snap_p.x()-start.x(), snap_p.y()-start.y()
-            if abs(dy) > abs(dx):
-                end = QPointF(start.x(), snap_p.y())
-            else:
-                end = QPointF(snap_p.x(), start.y())
-            pen = QPen(QColor("red"), 1, Qt.DashLine)
-            preview = True
-        elif not self.guide_enabled and self.points:
-            start = self.points[-1]
-            dx, dy = snap_p.x()-start.x(), snap_p.y()-start.y()
-            if not self.free_mode:
-                if abs(dx) > abs(dy):
-                    end = QPointF(snap_p.x(), start.y())
-                else:
-                    end = QPointF(start.x(), snap_p.y())
-            else:
-                end = snap_p
-            pen = QPen(QColor("green"), 1, Qt.DashLine)
-            preview = True
 
-        if preview:
-            self.preview_line.setPen(pen)
-            self.preview_line.setLine(start.x(), start.y(), end.x(), end.y())
-            self.preview_line.show()
-            dist_m = ((end.x()-start.x())**2 + (end.y()-start.y())**2)**0.5 / self.scale_factor
-            mid = QPointF((start.x()+end.x())/2, (start.y()+end.y())/2)
-            color = QColor("red") if self.guide_enabled else QColor("green")
-            self.preview_label.setDefaultTextColor(color)
-            self.preview_label.setPlainText(f"{dist_m:.2f} m")
+        # Polyline preview (free, always follows mouse)
+        if self.polyline_enabled and self.points:
+            self.free_mode = bool(event.modifiers() & Qt.ShiftModifier)
+            alt_held = bool(event.modifiers() & Qt.AltModifier)
+            ref = self.points[0] if alt_held else self.points[-1]
+            neighbor = (self.points[1] if alt_held and len(self.points) > 1
+                        else self.points[-2] if not alt_held and len(self.points) > 1
+                        else None)
+            snap_pt = scene_p  # Use free mouse position for preview
+
+            if neighbor and not self.free_mode:
+                dx, dy = snap_pt.x() - ref.x(), snap_pt.y() - ref.y()
+                if abs(dx) > abs(dy):
+                    target = QPointF(snap_pt.x(), ref.y())
+                else:
+                    target = QPointF(ref.x(), snap_pt.y())
+            else:
+                target = snap_pt
+
+            self.preview_line.setLine(ref.x(), ref.y(), target.x(), target.y())
+            dist = math.hypot(target.x() - ref.x(), target.y() - ref.y()) / self.scale_factor
+            mid = QPointF((ref.x() + target.x()) / 2, (ref.y() + target.y()) / 2)
+            self.preview_label.setPlainText(f"{dist:.2f} m")
             self.preview_label.setPos(mid)
+            self.preview_line.show()
             self.preview_label.show()
         else:
             self.preview_line.hide()
             self.preview_label.hide()
 
-        # 3) panning
-        if getattr(self, '_panning', False):
-            d = event.pos() - self._pan_start
-            self._pan_start = event.pos()
-            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(d.x()))
-            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(d.y()))
-            return
-
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MiddleButton:
+        if event.button() == Qt.MiddleButton and self._panning:
             self._panning = False
-            self.setCursor(Qt.CrossCursor)
+            self.setCursor(Qt.ArrowCursor)
+            self.snap_marker.hide()
             return
+
+        self.snap_marker.hide()
+        self.preview_line.hide()
+        self.preview_label.hide()
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
-        # undo/redo
+        if event.key() == Qt.Key_Escape and (self.polyline_enabled or self.guide_enabled or self.pan_enabled):
+            self.toggle_pointer_mode(True)
+            parent = self.parent()
+            if isinstance(parent, QMainWindow):
+                ptr_act = parent.findChild(QAction, "Pointer")
+                if ptr_act:
+                    ptr_act.setChecked(True)
+            return
+
+        if event.key() == Qt.Key_Delete:
+            self.delete_selected()
+            return
         if event.modifiers() & Qt.ControlModifier:
             if event.key() == Qt.Key_Z:
-                self.undo(); return
+                self.undo()
+                return
             if event.key() == Qt.Key_Y:
-                self.redo(); return
-
-        # grid shortcuts
-        if event.key() in (Qt.Key_Plus, Qt.Key_Equal):
-            self.increase_grid(); return
-        if event.key() == Qt.Key_Minus:
-            self.decrease_grid(); return
-
-        # enter length prompt
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            if self.guide_enabled and self._guide_start is not None:
-                self.prompt_guide_length_input(); return
-            if self.points:
-                self.prompt_length_input(); return
+                self.redo()
+                return
 
         super().keyPressEvent(event)
 
-    # ─── LENGTH INPUTS & LABELS ────────────────────────────────────────
-    def prompt_length_input(self):
-        length, ok = QInputDialog.getDouble(
-            self, "Segment Length", "Enter length (meters):",
-            1.0, 0.01, 10000.0, 2
-        )
-        if not ok:
-            return
-        last = self.points[-1]
-        cursor_p = self.mapToScene(self.mapFromGlobal(QCursor.pos()))
-        dx, dy   = cursor_p.x()-last.x(), cursor_p.y()-last.y()
-        if self.free_mode:
-            # vector direction
-            norm = (dx*dx + dy*dy)**0.5
-            if norm == 0: return
-            ux, uy = dx/norm, dy/norm
-        else:
-            # axis constrained
-            if abs(dx) > abs(dy):
-                ux, uy = (1 if dx>0 else -1), 0
-            else:
-                ux, uy = 0, (1 if dy>0 else -1)
-        pt = QPointF(
-            last.x() + ux * length * self.scale_factor,
-            last.y() + uy * length * self.scale_factor
-        )
-        pt = self.snap_to_grid(pt)
-        self.save_perimeter_state()
-        self.points.append(pt)
-        self._refresh()
+    def _refresh_perimeter(self):
+        for ln in self.perim_items:
+            self.scene.removeItem(ln)
+        for lbl in self.length_items:
+            self.scene.removeItem(lbl)
+        for dot in self.point_items:
+            self.scene.removeItem(dot)
+        self.perim_items.clear()
+        self.length_items.clear()
+        self.point_items.clear()
 
-    def prompt_guide_length_input(self):
-        length, ok = QInputDialog.getDouble(
-            self, "Guide Length", "Enter guide length (meters):",
-            1.0, 0.01, 10000.0, 2
+        for i, pt in enumerate(self.points):
+            dot = DraggablePoint(self, i, pt)
+            self.scene.addItem(dot)
+            self.point_items.append(dot)
+            if i > 0:
+                p0 = self.points[i - 1]
+                ln = QGraphicsLineItem(p0.x(), p0.y(), pt.x(), pt.y())
+                ln.setPen(QPen(QColor("green"), 2))
+                ln.setFlag(QGraphicsItem.ItemIsSelectable, True)
+                self.scene.addItem(ln)
+                self.perim_items.append(ln)
+                dist = math.hypot(pt.x()-p0.x(), pt.y()-p0.y()) / self.scale_factor
+                mid  = QPointF((p0.x()+pt.x())/2, (p0.y()+pt.y())/2)
+                lbl  = QGraphicsSimpleTextItem(f"{dist:.2f} m")
+                lbl.setPos(mid)
+                lbl.setZValue(1)
+                self.scene.addItem(lbl)
+                self.length_items.append(lbl)
+
+    def _refresh_guides(self):
+        # Remove ALL old lines and labels
+        for ln in self.guide_items:
+            self.scene.removeItem(ln)
+        for lbl in self.guide_labels:
+            self.scene.removeItem(lbl)
+        self.guide_items.clear()
+        self.guide_labels.clear()
+        # Recreate lines/labels for current guides
+        for s, e in self.guides:
+            ln = QGraphicsLineItem(s.x(), s.y(), e.x(), e.y())
+            ln.setPen(QPen(QColor("red"), 1))
+            ln.setFlag(QGraphicsItem.ItemIsSelectable, True)
+            self.scene.addItem(ln)
+            self.guide_items.append(ln)
+            lbl = QGraphicsSimpleTextItem(
+                f"{math.hypot(e.x()-s.x(), e.y()-s.y())/self.scale_factor:.2f} m"
+            )
+            lbl.setBrush(QBrush(QColor("red")))
+            mid = QPointF((s.x()+e.x())/2, (s.y()+e.y())/2)
+            lbl.setPos(mid)
+            lbl.setZValue(1)
+            self.scene.addItem(lbl)
+            self.guide_labels.append(lbl)
+
+
+    def _add_guide_length_label(self, s, e):
+        lbl = QGraphicsSimpleTextItem(
+            f"{math.hypot(e.x()-s.x(), e.y()-s.y())/self.scale_factor:.2f} m"
         )
-        if not ok or self._guide_start is None:
-            return
-        sx, sy = self._guide_start.x(), self._guide_start.y()
-        cursor_p = self.mapToScene(self.mapFromGlobal(QCursor.pos()))
-        dx, dy   = cursor_p.x()-sx, cursor_p.y()-sy
-        if abs(dy) > abs(dx):
-            sign = 1 if dy>0 else -1
-            start = QPointF(sx, sy)
-            end   = QPointF(sx, sy + sign * length * self.scale_factor)
-        else:
-            sign = 1 if dx>0 else -1
-            start = QPointF(sx, sy)
-            end   = QPointF(sx + sign * length * self.scale_factor, sy)
-        end = self.snap_to_grid(end)
-        pen  = QPen(QColor("red"), 1, Qt.SolidLine)
-        line = QGraphicsLineItem(start.x(), start.y(), end.x(), end.y())
-        line.setPen(pen)
-        self.scene.addItem(line)
-        self.save_guide_state()
-        self.guides.append((start, end))
-        self.guide_items.append(line)
-        lbl = self._add_guide_length_label(start, end)
-        self.guide_labels.append(lbl)
-        self._guide_start = None
-
-    def _add_length_label(self, p1: QPointF, p2: QPointF):
-        dist_px = ((p2.x()-p1.x())**2 + (p2.y()-p1.y())**2)**0.5
-        dist_m  = dist_px / self.scale_factor
-        mid     = QPointF((p1.x()+p2.x())/2, (p1.y()+p2.y())/2)
-        lbl     = QGraphicsSimpleTextItem(f"{dist_m:.2f} m")
-        lbl.setPos(mid)
-        lbl.setZValue(1)
-        self.scene.addItem(lbl)
-        self.length_items.append(lbl)
-
-    def _add_guide_length_label(self, p1: QPointF, p2: QPointF):
-        dist_px = ((p2.x()-p1.x())**2 + (p2.y()-p1.y())**2)**0.5
-        dist_m  = dist_px / self.scale_factor
-        mid     = QPointF((p1.x()+p2.x())/2, (p1.y()+p2.y())/2)
-        lbl     = QGraphicsSimpleTextItem(f"{dist_m:.2f} m")
         lbl.setBrush(QBrush(QColor("red")))
+        mid = QPointF((s.x()+e.x())/2, (s.y()+e.y())/2)
         lbl.setPos(mid)
         lbl.setZValue(1)
         self.scene.addItem(lbl)
         return lbl
+
+    def clear_guides(self):
+        """
+        Remove all guide lines and their labels, preserving undo history.
+        """
+        self.save_state()
+        for ln in list(self.guide_items):
+            self.scene.removeItem(ln)
+        for lbl in list(self.guide_labels):
+            self.scene.removeItem(lbl)
+        self.guide_items.clear()
+        self.guide_labels.clear()
+        self.guides.clear()
+        self._refresh_guides()
+
+    def clear_all(self):
+        self.points.clear()
+        self.guides.clear()
+        self.save_state()
+        self._refresh_perimeter()
+        self._refresh_guides()
+        self.snap_marker.hide()
+        self.preview_line.hide()
+        self.preview_label.hide()
+        self.toggle_pointer_mode(True)
+        
+
+    def delete_selected(self):
+        for item in self.scene.selectedItems():
+            if item in self.point_items or item in self.perim_items:
+                if item in self.point_items:
+                    idx = self.point_items.index(item)
+                else:
+                    idx = self.perim_items.index(item) + 1
+                del self.points[idx]
+                self.save_state()  # after deletion
+                self._refresh_perimeter()
+                return
+            if item in self.guide_items:
+                idx = self.guide_items.index(item)
+                del self.guides[idx]
+                self.save_state()  # after deletion
+                self._refresh_guides()
+                return
+
