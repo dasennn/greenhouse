@@ -1,4 +1,3 @@
-from typing import Optional
 import math
 from PySide6.QtWidgets import (
     QGraphicsView,
@@ -10,9 +9,10 @@ from PySide6.QtWidgets import (
     QGraphicsSimpleTextItem,
     QInputDialog,
     QMainWindow,
+    QMessageBox,
 )
 from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QAction
-from PySide6.QtCore import Qt, QPointF, QRectF
+from PySide6.QtCore import Qt, QPointF, QRectF, Signal
 
 class DraggablePoint(QGraphicsEllipseItem):
     def __init__(self, view, index, pos):
@@ -41,6 +41,7 @@ class DraggablePoint(QGraphicsEllipseItem):
 
 
 class DrawingView(QGraphicsView):
+    perimeter_closed = Signal(list, float, float, int, int)  # points, perimeter_m, area_m2, full, partial  # points, perimeter_m, full_grid_boxes
     def __init__(self, parent=None):
         super().__init__(parent)
         self.scene = QGraphicsScene(-2000, -2000, 4000, 4000, self)
@@ -64,6 +65,9 @@ class DrawingView(QGraphicsView):
         self.guide_enabled    = False
         self.pan_enabled      = False
         self.free_mode        = False
+
+        # Perimeter lock
+        self.perimeter_locked = False
 
         # Drawing state
         self.points        = []      # list of QPointF
@@ -104,9 +108,86 @@ class DrawingView(QGraphicsView):
         self._panning   = False
         self._pan_start = QPointF()
 
-        # Initialize undo stack
-        self.save_state()
+        # Dimensional input (type length then Enter)
+        self._dim_input = ""
+        self.last_mouse_scene = QPointF()
+    def _commit_dimensional_segment(self, length_m: float, alt_held: bool, free_mode: bool):
+        """
+        Commit a segment with exact length in meters.
+        Direction is determined by current mouse vector from the reference point:
+          - If free_mode is False (default), lock to horizontal/vertical based on larger delta.
+          - If free_mode is True (Shift held), follow the mouse direction freely.
+        """
+        if not self.points:
+            return
 
+        ref = self.points[0] if alt_held else self.points[-1]
+        # Determine direction vector from ref to current mouse scene position
+        dx = self.last_mouse_scene.x() - ref.x()
+        dy = self.last_mouse_scene.y() - ref.y()
+
+        if not free_mode:
+            # Axis lock: choose axis with larger magnitude
+            if abs(dx) >= abs(dy):
+                # Horizontal
+                ux, uy = (1.0 if dx >= 0 else -1.0), 0.0
+            else:
+                # Vertical
+                ux, uy = 0.0, (1.0 if dy >= 0 else -1.0)
+        else:
+            # Free: use actual mouse direction; fall back to +X if zero length
+            mag = math.hypot(dx, dy)
+            if mag == 0:
+                ux, uy = 1.0, 0.0
+            else:
+                ux, uy = dx / mag, dy / mag
+
+        # Convert meters to scene pixels
+        L = length_m * self.scale_factor
+        new_x = ref.x() + ux * L
+        new_y = ref.y() + uy * L
+        new_pt = QPointF(new_x, new_y)
+
+        if alt_held:
+            self.points.insert(0, new_pt)
+        else:
+            self.points.append(new_pt)
+
+        self.save_state()
+        self.preview_line.hide()
+        self.preview_label.hide()
+        self._refresh_perimeter()
+
+    def _commit_dimensional_guide(self, length_m: float):
+        """
+        Commit a guide line with an exact length in meters from the current guide start.
+        Direction is axis-locked (horizontal/vertical) and chosen based on the current
+        mouse vector from the start point.
+        """
+        if self._guide_start is None:
+            return
+
+        s = self._guide_start
+        # Use current mouse to pick the axis and direction
+        dx = self.last_mouse_scene.x() - s.x()
+        dy = self.last_mouse_scene.y() - s.y()
+
+        if abs(dx) >= abs(dy):
+            # Horizontal guide
+            ux, uy = (1.0 if dx >= 0 else -1.0), 0.0
+        else:
+            # Vertical guide
+            ux, uy = 0.0, (1.0 if dy >= 0 else -1.0)
+
+        L = length_m * self.scale_factor
+        e = QPointF(s.x() + ux * L, s.y() + uy * L)
+
+        self.guides.append((s, e))
+        self.save_state()
+        self._guide_start = None
+        self._refresh_guides()
+        self.preview_line.hide()
+        self.preview_label.hide()
     def save_state(self):
         # Save a deep copy of BOTH perimeter and guide state
         state = {
@@ -201,8 +282,13 @@ class DrawingView(QGraphicsView):
         else:
             self.setDragMode(QGraphicsView.NoDrag)
 
+    
     def toggle_polyline_mode(self, on: bool):
+        if on and getattr(self, "perimeter_locked", False):
+            QMessageBox.information(self, "Perimeter is closed", "Drawing is locked. Use Clear All to start over.")
+            on = False
         self.polyline_enabled = on
+
         if on:
             self.pointer_enabled = False
             self.guide_enabled   = False
@@ -211,8 +297,13 @@ class DrawingView(QGraphicsView):
         else:
             self.setCursor(Qt.ArrowCursor)
 
+    
     def toggle_guide_mode(self, on: bool):
+        if on and getattr(self, "perimeter_locked", False):
+            QMessageBox.information(self, "Perimeter is closed", "Drawing is locked. Use Clear All to start over.")
+            on = False
         self.guide_enabled = on
+
         self._guide_start  = None
         if on:
             self.pointer_enabled  = False
@@ -280,6 +371,17 @@ class DrawingView(QGraphicsView):
             return scene_p, None
 
     def mousePressEvent(self, event):
+        # Clear any live dimension entry on click
+        self._dim_input = ""
+        self.preview_label.hide()
+        # If perimeter is locked, restrict to selection and panning; ignore creation clicks
+        if getattr(self, 'perimeter_locked', False):
+            if event.button() == Qt.MiddleButton:
+                self._panning = True
+                self._pan_start = event.pos()
+                self.setCursor(Qt.ClosedHandCursor)
+                return
+            return QGraphicsView.mousePressEvent(self, event)
         # Middle-button drag starts panning
         if event.button() == Qt.MiddleButton:
             self._panning = True
@@ -378,6 +480,7 @@ class DrawingView(QGraphicsView):
 
         view_p = event.pos()
         scene_p = self.mapToScene(view_p)
+        self.last_mouse_scene = scene_p
         snap_pt, snap_type = self.snap_to_greenhouse_grid_or_edge_mid_if_close(scene_p, view_p)
 
         grid_x = 5 * self.scale_factor
@@ -432,6 +535,12 @@ class DrawingView(QGraphicsView):
             self.preview_line.hide()
             self.preview_label.hide()
 
+        # If user is typing a dimension, show that near the cursor
+        if (self.polyline_enabled or self.guide_enabled) and self._dim_input:
+            self.preview_label.setPlainText(f"{self._dim_input} m")
+            self.preview_label.setPos(self.last_mouse_scene + QPointF(10, 10))
+            self.preview_label.show()
+
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -467,8 +576,175 @@ class DrawingView(QGraphicsView):
                 self.redo()
                 return
 
+        # Dimensional input (polyline mode): Only commit on Enter/Return
+        if self.polyline_enabled:
+            key = event.key()
+            text = event.text()
+
+            # Allow digits and a single decimal point to build up buffer (optional)
+            if text and (text.isdigit() or text == "."):
+                if text == "." and "." in self._dim_input:
+                    pass
+                else:
+                    self._dim_input += text
+                    # Show live input near cursor
+                    self.preview_label.setPlainText(f"{self._dim_input} m")
+                    self.preview_label.setPos(self.last_mouse_scene + QPointF(10, 10))
+                    self.preview_label.show()
+                return
+
+            # Allow Backspace editing of buffer
+            if key == Qt.Key_Backspace and self._dim_input:
+                self._dim_input = self._dim_input[:-1]
+                if self._dim_input:
+                    self.preview_label.setPlainText(f"{self._dim_input} m")
+                    self.preview_label.setPos(self.last_mouse_scene + QPointF(10, 10))
+                    self.preview_label.show()
+                else:
+                    self.preview_label.hide()
+                return
+
+            # Cancel buffer with Escape (but do not exit polyline mode)
+            if key == Qt.Key_Escape and self._dim_input:
+                self._dim_input = ""
+                self.preview_label.hide()
+                return
+
+            # Commit on Enter / Return
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                # If buffer is empty, prompt for length
+                if not self._dim_input:
+                    # Prompt user for length (meters)
+                    val, ok = QInputDialog.getDouble(
+                        self, "Segment Length", "Enter segment length (meters):", 1.0, 0.01, 1000.0, 2
+                    )
+                    if not ok:
+                        # Cancelled dialog
+                        self._dim_input = ""
+                        self.preview_label.hide()
+                        return
+                    length_m = val
+                else:
+                    try:
+                        length_m = float(self._dim_input)
+                    except ValueError:
+                        self._dim_input = ""
+                        self.preview_label.hide()
+                        return
+                alt_held = bool(event.modifiers() & Qt.AltModifier)
+                free_mode = bool(event.modifiers() & Qt.ShiftModifier)
+                self._commit_dimensional_segment(length_m, alt_held, free_mode)
+                self._dim_input = ""
+                self.preview_label.hide()
+                return
+
+        # Dimensional input (guide mode): Only commit on Enter/Return
+        if self.guide_enabled:
+            key = event.key()
+            text = event.text()
+
+            # Allow digits and a single decimal point
+            if text and (text.isdigit() or text == "."):
+                if text == "." and "." in self._dim_input:
+                    pass
+                else:
+                    self._dim_input += text
+                    # Show live input near cursor
+                    self.preview_label.setPlainText(f"{self._dim_input} m")
+                    self.preview_label.setPos(self.last_mouse_scene + QPointF(10, 10))
+                    self.preview_label.show()
+                return
+
+            # Allow Backspace editing of buffer
+            if key == Qt.Key_Backspace and self._dim_input:
+                self._dim_input = self._dim_input[:-1]
+                if self._dim_input:
+                    self.preview_label.setPlainText(f"{self._dim_input} m")
+                    self.preview_label.setPos(self.last_mouse_scene + QPointF(10, 10))
+                    self.preview_label.show()
+                else:
+                    self.preview_label.hide()
+                return
+
+            # Commit on Enter / Return (only if a start point exists)
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                if self._guide_start is None:
+                    # No active guide start; ignore Enter in this context
+                    self._dim_input = ""
+                    self.preview_label.hide()
+                    return
+
+                # If buffer is empty, prompt for length (meters)
+                if not self._dim_input:
+                    val, ok = QInputDialog.getDouble(
+                        self, "Guide Length", "Enter guide length (meters):", 1.0, 0.01, 1000.0, 2
+                    )
+                    if not ok:
+                        self._dim_input = ""
+                        self.preview_label.hide()
+                        return
+                    length_m = val
+                else:
+                    try:
+                        length_m = float(self._dim_input)
+                    except ValueError:
+                        self._dim_input = ""
+                        self.preview_label.hide()
+                        return
+
+                self._commit_dimensional_guide(length_m)
+                self._dim_input = ""
+                self.preview_label.hide()
+                return
+
         super().keyPressEvent(event)
 
+
+    
+
+    def _polygon_area_m2(self, pts):
+            """Return area (m^2) of polygon given by list of QPointF (closed or open)."""
+            if len(pts) < 3:
+                return 0.0
+            arr = list(pts)
+            if arr[0] != arr[-1]:
+                arr.append(arr[0])
+            s = 0.0
+            for i in range(len(arr)-1):
+                x1, y1 = arr[i].x(), arr[i].y()
+                x2, y2 = arr[i+1].x(), arr[i+1].y()
+                s += x1*y2 - x2*y1
+            area_px2 = abs(s) * 0.5
+            return area_px2 / (self.scale_factor ** 2)
+
+    def close_perimeter(self):
+                """Close the current perimeter (if open), lock drawing, and emit perimeter/grid/area info."""
+                if len(self.points) < 3:
+                    QMessageBox.information(self, "Close Perimeter", "Need at least 3 points to close a perimeter.")
+                    return
+                if self.points[0] != self.points[-1]:
+                    self.save_state()
+                    self.points.append(self.points[0])
+                self._refresh_perimeter()
+
+                # Calculate perimeter length in meters
+                perimeter_m = 0.0
+                for i in range(1, len(self.points)):
+                    p0, p1 = self.points[i-1], self.points[i]
+                    perimeter_m += math.hypot(p1.x()-p0.x(), p1.y()-p0.y()) / self.scale_factor
+
+                # Area in square meters
+                area_m2 = self._polygon_area_m2(self.points)
+
+                # Grid boxes
+                full, partial = self.compute_grid_box_counts()
+
+                # Hard lock drawing until Clear All
+                self.perimeter_locked = True
+                self.toggle_pointer_mode(True)
+
+                # Emit extended data
+                self.perimeter_closed.emit(list(self.points), perimeter_m, area_m2, full, partial)
     def _refresh_perimeter(self):
         for ln in self.perim_items:
             self.scene.removeItem(ln)
@@ -524,18 +800,7 @@ class DrawingView(QGraphicsView):
             self.scene.addItem(lbl)
             self.guide_labels.append(lbl)
 
-
-    def _add_guide_length_label(self, s, e):
-        lbl = QGraphicsSimpleTextItem(
-            f"{math.hypot(e.x()-s.x(), e.y()-s.y())/self.scale_factor:.2f} m"
-        )
-        lbl.setBrush(QBrush(QColor("red")))
-        mid = QPointF((s.x()+e.x())/2, (s.y()+e.y())/2)
-        lbl.setPos(mid)
-        lbl.setZValue(1)
-        self.scene.addItem(lbl)
-        return lbl
-
+    
     def clear_guides(self):
         """
         Remove all guide lines and their labels, preserving undo history.
@@ -559,6 +824,8 @@ class DrawingView(QGraphicsView):
         self.snap_marker.hide()
         self.preview_line.hide()
         self.preview_label.hide()
+        self._dim_input = ""
+        self.perimeter_locked = False
         self.toggle_pointer_mode(True)
         
 
@@ -580,3 +847,131 @@ class DrawingView(QGraphicsView):
                 self._refresh_guides()
                 return
 
+
+    def analyze_grid_coverage(self):
+        """Compute and show how many full and partial greenhouse grid boxes are inside the drawn perimeter."""
+        if len(self.points) < 3:
+            QMessageBox.information(self, "Grid Coverage", "Draw at least 3 points to form a perimeter first.")
+            return
+        full, partial = self.compute_grid_box_counts()
+        msg = (
+            f"Complete grid boxes: {full}\n"
+            f"Partial grid boxes:  {partial}\n\n"
+            f"Grid size: 5m x 3m"
+        )
+        QMessageBox.information(self, "Grid Coverage", msg)
+
+    
+    def compute_grid_box_counts(self, points=None, grid_w_m: float = 5.0, grid_h_m: float = 3.0, scale_factor=None):
+        """
+        Count full and partial grid rectangles covered by the polygon.
+        - *Full* = all four rectangle corners are inside (or on) the polygon
+        - *Partial* = rectangle intersects polygon but is not full
+        Accepts optional explicit *points* ([(x,y), ...] in scene coordinates).
+        Grid size is in meters; converted to scene units via *scale_factor* (px/m).
+        Returns (full_count, partial_count).
+        """
+        # Resolve inputs
+        if scale_factor is None:
+            scale_factor = self.scale_factor
+        grid_w = grid_w_m * scale_factor
+        grid_h = grid_h_m * scale_factor
+        # Build polygon in scene coordinates
+        if points is None:
+            pts = [(p.x(), p.y()) for p in self.points]
+        else:
+            pts = [(float(x), float(y)) for (x, y) in points]
+        if len(pts) < 3:
+            return 0, 0
+        if pts[0] != pts[-1]:
+            pts = pts + [pts[0]]
+        # Helpers
+        EPS = 1e-7
+        def point_on_seg(px, py, x1, y1, x2, y2):
+            # Bounding box check with tolerance
+            if (min(x1, x2)-EPS <= px <= max(x1, x2)+EPS and
+                min(y1, y2)-EPS <= py <= max(y1, y2)+EPS):
+                # Collinearity via cross product
+                dx1, dy1 = x2 - x1, y2 - y1
+                dx2, dy2 = px - x1, py - y1
+                return abs(dx1*dy2 - dy1*dx2) <= EPS
+            return False
+        def point_in_poly(px, py):
+            # Winding / ray-casting with boundary = inside
+            inside = False
+            for i in range(len(pts)-1):
+                x1, y1 = pts[i]
+                x2, y2 = pts[i+1]
+                # Boundary check
+                if point_on_seg(px, py, x1, y1, x2, y2):
+                    return True
+                # Ray cast
+                if ((y1 > py) != (y2 > py)):
+                    xint = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
+                    if xint >= px - EPS:
+                        inside = not inside
+            return inside
+        def segs_intersect(a1, a2, b1, b2):
+            def orient(ax, ay, bx, by, cx, cy):
+                return (by - ay) * (cx - bx) - (bx - ax) * (cy - by)
+            (x1, y1), (x2, y2) = a1, a2
+            (x3, y3), (x4, y4) = b1, b2
+            # General case + collinear handling
+            def on_seg(xa, ya, xb, yb, xc, yc):
+                return (min(xa, xb)-EPS <= xc <= max(xa, xb)+EPS and
+                        min(ya, yb)-EPS <= yc <= max(ya, yb)+EPS and
+                        abs((xb-xa)*(yc-ya) - (yb-ya)*(xc-xa)) <= EPS)
+            d1 = orient(x1, y1, x2, y2, x3, y3)
+            d2 = orient(x1, y1, x2, y2, x4, y4)
+            d3 = orient(x3, y3, x4, y4, x1, y1)
+            d4 = orient(x3, y3, x4, y4, x2, y2)
+            if ((d1 > EPS and d2 < -EPS) or (d1 < -EPS and d2 > EPS)) and ((d3 > EPS and d4 < -EPS) or (d3 < -EPS and d4 > EPS)):
+                return True
+            # Collinear cases
+            if abs(d1) <= EPS and on_seg(x1, y1, x2, y2, x3, y3): return True
+            if abs(d2) <= EPS and on_seg(x1, y1, x2, y2, x4, y4): return True
+            if abs(d3) <= EPS and on_seg(x3, y3, x4, y4, x1, y1): return True
+            if abs(d4) <= EPS and on_seg(x3, y3, x4, y4, x2, y2): return True
+            return False
+        def poly_intersects_rect(x0, y0, x1, y1):
+            # Any corner inside polygon?
+            if point_in_poly(x0, y0) or point_in_poly(x1, y0) or point_in_poly(x1, y1) or point_in_poly(x0, y1):
+                return True
+            # Any polygon edge hits rectangle edges?
+            rect_edges = [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))]
+            for i in range(len(pts)-1):
+                a1 = pts[i]; a2 = pts[i+1]
+                for e in rect_edges:
+                    if segs_intersect(a1, a2, e[0], e[1]):
+                        return True
+            # Polygon fully contains rectangle? Check a mid point
+            mx = (x0 + x1) * 0.5; my = (y0 + y1) * 0.5
+            if point_in_poly(mx, my):
+                return True
+            return False
+        # Iterate grid cells covering bounding box of the polygon
+        xs = [x for x, _ in pts]
+        ys = [y for _, y in pts]
+        minx, maxx = min(xs), max(xs)
+        miny, maxy = min(ys), max(ys)
+        # Snap bbox to grid index range
+        gx0 = int((minx) // grid_w) - 1
+        gy0 = int((miny) // grid_h) - 1
+        gx1 = int((maxx) // grid_w) + 2
+        gy1 = int((maxy) // grid_h) + 2
+        full = 0
+        partial = 0
+        for gy in range(gy0, gy1):
+            y0 = gy * grid_h
+            y1 = y0 + grid_h
+            for gx in range(gx0, gx1):
+                x0 = gx * grid_w
+                x1 = x0 + grid_w
+                corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+                inside_flags = [point_in_poly(cx, cy) for (cx, cy) in corners]
+                if all(inside_flags):
+                    full += 1
+                else:
+                    if poly_intersects_rect(x0, y0, x1, y1):
+                        partial += 1
+        return full, partial
