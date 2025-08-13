@@ -1,25 +1,41 @@
-from PySide6.QtWidgets import QApplication, QMainWindow, QToolBar, QMessageBox
+from PySide6.QtGui import QPalette, QColor
+from PySide6.QtWidgets import QMainWindow, QMessageBox, QToolBar
+from services.models import Estimator, MaterialItem
 from ui.drawing_view import DrawingView
 from PySide6.QtGui import QAction, QActionGroup
-
-# Optional estimator import (supports either project layout)
-try:
-    from backend.estimator import Estimator, MaterialItem
-except Exception:
-    try:
-        from services.estimator import Estimator, MaterialItem
-    except Exception:
-        Estimator = None  # type: ignore
-        MaterialItem = None  # type: ignore
+from ui.column_height_dialog import ColumnHeightDialog
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Greenhouse Estimator")
+
+        # Set light mode palette
+        palette = QPalette()
+        palette.setColor(QPalette.Window, QColor(255, 255, 255))
+        palette.setColor(QPalette.WindowText, QColor(0, 0, 0))
+        palette.setColor(QPalette.Base, QColor(255, 255, 255))
+        palette.setColor(QPalette.AlternateBase, QColor(240, 240, 240))
+        palette.setColor(QPalette.ToolTipBase, QColor(255, 255, 220))
+        palette.setColor(QPalette.ToolTipText, QColor(0, 0, 0))
+        palette.setColor(QPalette.Text, QColor(0, 0, 0))
+        palette.setColor(QPalette.Button, QColor(240, 240, 240))
+        palette.setColor(QPalette.ButtonText, QColor(0, 0, 0))
+        palette.setColor(QPalette.BrightText, QColor(255, 0, 0))
+        palette.setColor(QPalette.Highlight, QColor(0, 120, 215))
+        palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+        self.setPalette(palette)
+
+        self.resize(1024, 768)
+
+        # Lazy-created estimator (connected to backend/services if available)
+        self.estimator = None
+
         self.view = DrawingView(self)
         self.setCentralWidget(self.view)
         self.resize(1024, 768)
         self.estimator = None  # lazy-created when needed
+        self.large_column_height = None
+        self.small_column_height = None
         self._create_toolbar()
         self.view.perimeter_closed.connect(self._on_perimeter_closed)
 
@@ -74,6 +90,11 @@ class MainWindow(QMainWindow):
             act.triggered.connect(handler)
             toolbar.addAction(act)
 
+        # Add a toolbar action to open the column height dialog
+        column_height_action = QAction("Set Column Heights", self)
+        column_height_action.triggered.connect(self._set_column_heights)
+        toolbar.addAction(column_height_action)
+
     def _ensure_estimator(self):
         """Create an Estimator once, if available. Returns the instance or None."""
         if getattr(self, "estimator", None) is not None:
@@ -82,7 +103,8 @@ class MainWindow(QMainWindow):
             self.estimator = None
             return None
         try:
-            materials = {}  # TODO: populate with real MaterialItem entries
+            # TODO: load real materials/prices from config or file. Keep empty for now.
+            materials = {}
             self.estimator = Estimator(materials=materials, scale_factor=self.view.scale_factor)
         except Exception:
             self.estimator = None
@@ -165,3 +187,23 @@ class MainWindow(QMainWindow):
                 # You can use bill.get("grid_cells") to get backend-calculated grid info if needed
             except Exception:
                 pass
+
+    def _set_column_heights(self):
+        """Open a dialog to set the heights of large and small columns."""
+        dialog = ColumnHeightDialog(self)
+        if dialog.exec():
+            large_height, small_height = dialog.get_values()
+            if large_height is not None and small_height is not None:
+                self.large_column_height = large_height
+                self.small_column_height = small_height
+                QMessageBox.information(
+                    self,
+                    "Column Heights Set",
+                    f"Large Column Height: {large_height} m\nSmall Column Height: {small_height} m"
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Input",
+                    "Please enter valid numeric values for column heights."
+                )

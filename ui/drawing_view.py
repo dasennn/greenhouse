@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QAction
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal
 
+EPS = 1e-7  # Tolerance for floating-point comparisons
+
 class DraggablePoint(QGraphicsEllipseItem):
     def __init__(self, view, index, pos):
         super().__init__(-3, -3, 6, 6)
@@ -699,8 +701,47 @@ class DrawingView(QGraphicsView):
 
         super().keyPressEvent(event)
 
-
     
+    def segs_intersect(self, a1, a2, b1, b2):
+        """Check if two line segments intersect with stricter conditions."""
+        EPS = 1e-7  # Tolerance for floating-point comparisons
+
+        def orient(ax, ay, bx, by, cx, cy):
+            return (by - ay) * (cx - bx) - (bx - ax) * (cy - by)
+
+        (x1, y1), (x2, y2) = a1, a2
+        (x3, y3), (x4, y4) = b1, b2
+
+        def on_seg(xa, ya, xb, yb, xc, yc):
+            return (
+                min(xa, xb) - EPS <= xc <= max(xa, xb) + EPS
+                and min(ya, yb) - EPS <= yc <= max(ya, yb) + EPS
+                and abs((xb - xa) * (yc - ya) - (yb - ya) * (xc - xa)) <= EPS
+            )
+
+        d1 = orient(x1, y1, x2, y2, x3, y3)
+        d2 = orient(x1, y1, x2, y2, x4, y4)
+        d3 = orient(x3, y3, x4, y4, x1, y1)
+        d4 = orient(x3, y3, x4, y4, x2, y2)
+
+        # Check if segments straddle each other
+        if (
+            ((d1 > EPS and d2 < -EPS) or (d1 < -EPS and d2 > EPS))
+            and ((d3 > EPS and d4 < -EPS) or (d3 < -EPS and d4 > EPS))
+        ):
+            return True
+
+        # Check if segments are collinear and overlap
+        if abs(d1) <= EPS and on_seg(x1, y1, x2, y2, x3, y3):
+            return True
+        if abs(d2) <= EPS and on_seg(x1, y1, x2, y2, x4, y4):
+            return True
+        if abs(d3) <= EPS and on_seg(x3, y3, x4, y4, x1, y1):
+            return True
+        if abs(d4) <= EPS and on_seg(x3, y3, x4, y4, x2, y2):
+            return True
+
+        return False
 
     def _polygon_area_m2(self, pts):
             """Return area (m^2) of polygon given by list of QPointF (closed or open)."""
@@ -885,8 +926,8 @@ class DrawingView(QGraphicsView):
             return 0, 0
         if pts[0] != pts[-1]:
             pts = pts + [pts[0]]
+
         # Helpers
-        EPS = 1e-7
         def point_on_seg(px, py, x1, y1, x2, y2):
             # Bounding box check with tolerance
             if (min(x1, x2)-EPS <= px <= max(x1, x2)+EPS and
@@ -896,6 +937,7 @@ class DrawingView(QGraphicsView):
                 dx2, dy2 = px - x1, py - y1
                 return abs(dx1*dy2 - dy1*dx2) <= EPS
             return False
+
         def point_in_poly(px, py):
             # Winding / ray-casting with boundary = inside
             inside = False
@@ -911,44 +953,41 @@ class DrawingView(QGraphicsView):
                     if xint >= px - EPS:
                         inside = not inside
             return inside
-        def segs_intersect(a1, a2, b1, b2):
-            def orient(ax, ay, bx, by, cx, cy):
-                return (by - ay) * (cx - bx) - (bx - ax) * (cy - by)
-            (x1, y1), (x2, y2) = a1, a2
-            (x3, y3), (x4, y4) = b1, b2
-            # General case + collinear handling
-            def on_seg(xa, ya, xb, yb, xc, yc):
-                return (min(xa, xb)-EPS <= xc <= max(xa, xb)+EPS and
-                        min(ya, yb)-EPS <= yc <= max(ya, yb)+EPS and
-                        abs((xb-xa)*(yc-ya) - (yb-ya)*(xc-xa)) <= EPS)
-            d1 = orient(x1, y1, x2, y2, x3, y3)
-            d2 = orient(x1, y1, x2, y2, x4, y4)
-            d3 = orient(x3, y3, x4, y4, x1, y1)
-            d4 = orient(x3, y3, x4, y4, x2, y2)
-            if ((d1 > EPS and d2 < -EPS) or (d1 < -EPS and d2 > EPS)) and ((d3 > EPS and d4 < -EPS) or (d3 < -EPS and d4 > EPS)):
-                return True
-            # Collinear cases
-            if abs(d1) <= EPS and on_seg(x1, y1, x2, y2, x3, y3): return True
-            if abs(d2) <= EPS and on_seg(x1, y1, x2, y2, x4, y4): return True
-            if abs(d3) <= EPS and on_seg(x3, y3, x4, y4, x1, y1): return True
-            if abs(d4) <= EPS and on_seg(x3, y3, x4, y4, x2, y2): return True
-            return False
+
         def poly_intersects_rect(x0, y0, x1, y1):
-            # Any corner inside polygon?
-            if point_in_poly(x0, y0) or point_in_poly(x1, y0) or point_in_poly(x1, y1) or point_in_poly(x0, y1):
-                return True
-            # Any polygon edge hits rectangle edges?
-            rect_edges = [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))]
-            for i in range(len(pts)-1):
-                a1 = pts[i]; a2 = pts[i+1]
+            """Check if the polygon intersects the rectangle."""
+            print(f"Checking intersection for rect: ({x0}, {y0}), ({x1}, {y1})")
+
+            # Any polygon edge intersects rectangle edges?
+            rect_edges = [
+                ((x0, y0), (x1, y0)),
+                ((x1, y0), (x1, y1)),
+                ((x1, y1), (x0, y1)),
+                ((x0, y1), (x0, y0))
+            ]
+            for i in range(len(pts) - 1):
+                a1, a2 = pts[i], pts[i + 1]
                 for e in rect_edges:
-                    if segs_intersect(a1, a2, e[0], e[1]):
+                    if self.segs_intersect(a1, a2, e[0], e[1]):
+                        print("Edge intersects rectangle")
                         return True
-            # Polygon fully contains rectangle? Check a mid point
-            mx = (x0 + x1) * 0.5; my = (y0 + y1) * 0.5
-            if point_in_poly(mx, my):
+
+            # Check if the rectangle is partially contained (at least one corner inside polygon)
+            corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+            inside_corners = [point_in_poly(cx, cy) for cx, cy in corners]
+            if any(inside_corners) and not all(inside_corners):
+                print("Rectangle partially contained")
                 return True
+
+            # Check if the rectangle fully contains the polygon (midpoint test)
+            mx, my = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+            if point_in_poly(mx, my):
+                print("Midpoint inside polygon")
+                return True
+
+            print("No intersection")
             return False
+
         # Iterate grid cells covering bounding box of the polygon
         xs = [x for x, _ in pts]
         ys = [y for _, y in pts]
@@ -970,8 +1009,12 @@ class DrawingView(QGraphicsView):
                 corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
                 inside_flags = [point_in_poly(cx, cy) for (cx, cy) in corners]
                 if all(inside_flags):
+                    print(f"Full box at grid ({gx}, {gy})")
                     full += 1
+                elif poly_intersects_rect(x0, y0, x1, y1):
+                    print(f"Partial box at grid ({gx}, {gy})")
+                    partial += 1
                 else:
-                    if poly_intersects_rect(x0, y0, x1, y1):
-                        partial += 1
+                    print(f"Empty box at grid ({gx}, {gy})")
+
         return full, partial
