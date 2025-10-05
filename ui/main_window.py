@@ -113,7 +113,7 @@ class MainWindow(QMainWindow):
     def _close_perimeter(self):
         self.view.close_perimeter()
 
-    def _on_perimeter_closed(self, points, perimeter_m, area_m2, full_grid_boxes, partial_grid_boxes):
+    def _on_perimeter_closed(self, points, perimeter_m, area_m2, partial_details):
         # Normalize to list of (x, y) floats and drop duplicated closing point if present
         xy = []
         for p in points:
@@ -125,68 +125,62 @@ class MainWindow(QMainWindow):
         if len(xy) >= 2 and xy[0] == xy[-1]:
             xy = xy[:-1]
 
-        # Defaults from view
-        full = full_grid_boxes
-        partial = partial_grid_boxes
-
-        # Only try services.geometry
-        _count_boxes = None
+        # Compute grid coverage summary (full + partial areas)
         try:
-            from services.geometry import count_grid_boxes as _count_boxes
+            coverage = self.view.compute_grid_coverage(points=xy, grid_w_m=5.0, grid_h_m=3.0)
         except Exception:
-            _count_boxes = None
+            coverage = None
 
-        full = partial = None
-        if _count_boxes is not None:
-            try:
-                full, partial = _count_boxes(
-                    xy,
-                    scale_factor=self.view.scale_factor,
-                    grid_w_m=5.0,
-                    grid_h_m=3.0,
-                )
-            except Exception:
-                pass
+        if coverage:
+            poly_area = coverage['polygon_area_m2']
+            full_count = coverage['full_count']
+            full_area = coverage['full_area_m2']
+            partials = coverage['partial_details']
+            partial_count = len(partials)
+            partial_area = sum(p['area_m2'] for p in partials)
 
-        # Always fallback to local computation if full or partial is None
-        if full is None or partial is None:
-            try:
-                local_full, local_partial = self.view.compute_grid_box_counts(
-                    points=xy, grid_w_m=5.0, grid_h_m=3.0, scale_factor=self.view.scale_factor
-                )
-                if full is None:
-                    full = full_grid_boxes if full_grid_boxes is not None else local_full
-                if partial is None:
-                    partial = local_partial
-            except Exception:
-                if full is None:
-                    full = full_grid_boxes
-                if partial is None:
-                    partial = 0  # Always set to 0 if cannot compute
+            msg = (
+                f"Perimeter: {perimeter_m:.2f} m\n"
+                f"Polygon area: {poly_area:.3f} m²\n"
+                f"Full boxes: {full_count} (area {full_area:.3f} m²)\n"
+                f"Partial boxes: {partial_count} (area {partial_area:.3f} m²)\n"
+                f"Sum full+partial area: {(full_area + partial_area):.3f} m²\n"
+                f"Grid size: 5m x 3m\n"
+            )
+            if partials:
+                msg += "\nPartial Box Details:\n"
+                for p in partials:
+                    msg += f"  Grid {p['grid']}: {p['area_m2']:.3f} m², perimeter inside = {p.get('boundary_length_m', 0.0):.3f} m\n"
+        else:
+            # Fallback: show minimal info
+            msg = (
+                f"Perimeter: {perimeter_m:.2f} m\n"
+                f"Area: {area_m2:.2f} m²\n"
+                f"Partial (cut) grid boxes: {len(partial_details)}\n"
+                f"Grid size: 5m x 3m\n"
+            )
+            if partial_details:
+                msg += "\nPartial Box Details:\n"
+                for pd in partial_details:
+                    grid = pd['grid']
+                    area_px2 = pd['intersection_area']
+                    sf = self.view.scale_factor
+                    area_m2 = area_px2 / (sf * sf) if sf and sf != 0 else 0.0
+                    msg += f"  Grid {grid}: Area inside = {area_m2:.3f} m²\n"
 
-        # Show summary dialog to user
-        QMessageBox.information(
-            self,
-            "Perimeter Closed",
-            (
-            f"Perimeter: {perimeter_m:.2f} m\n"
-            f"Area: {area_m2:.2f} m²\n"
-            f"Complete grid boxes: {full}\n"
-            f"Uncompleted grid boxes: {partial}\n"
-            f"Grid size: 5m x 3m"
-        )
-        )
-
-        # Pass perimeter and grid box info to backend estimator if available
-        est = self._ensure_estimator()
-        if est is not None:
-            try:
-                # Pass perimeter points (xy) to backend estimator
-                bill = est.compute_bill(xy)
-                # bill may include geometry, grid_cells, subtotal, etc.
-                # You can use bill.get("grid_cells") to get backend-calculated grid info if needed
-            except Exception:
-                pass
+        # Only show a short summary in the status bar here; the detailed popup is shown
+        # by DrawingView when the perimeter is closed. Print full details to console for
+        # debugging/history so we don't pop a second modal dialog.
+        try:
+            summary = f"Perimeter closed: {perimeter_m:.2f} m, area {poly_area:.3f} m², full+partial {(full_area + partial_area):.3f} m²"
+        except Exception:
+            summary = f"Perimeter closed: {perimeter_m:.2f} m, area {area_m2:.3f} m²"
+        # show brief message in status bar for a short time
+        try:
+            self.statusBar().showMessage(summary, 8000)
+        except Exception:
+            # if no status bar, quietly ignore (don't print to console)
+            pass
 
     def _set_column_heights(self):
         """Open a dialog to set the heights of large and small columns."""

@@ -11,10 +11,10 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
 )
-from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QAction
+from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QAction, QFont
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal
 
-EPS = 1e-7  # Tolerance for floating-point comparisons
+EPS = 1e-7
 
 class DraggablePoint(QGraphicsEllipseItem):
     def __init__(self, view, index, pos):
@@ -31,9 +31,19 @@ class DraggablePoint(QGraphicsEllipseItem):
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionChange:
-            # Update the data model while dragging
             new_pos = value
+            was_closed = False
+            if len(self.view.points) > 1:
+                try:
+                    was_closed = (self.view.points[0] == self.view.points[-1])
+                except Exception:
+                    was_closed = False
             self.view.points[self.index] = new_pos
+            if was_closed:
+                if self.index == 0 and len(self.view.points) > 1:
+                    self.view.points[-1] = new_pos
+                elif self.index == len(self.view.points) - 1 and len(self.view.points) > 1:
+                    self.view.points[0] = new_pos
         return super().itemChange(change, value)
 
     def mouseReleaseEvent(self, event):
@@ -43,7 +53,8 @@ class DraggablePoint(QGraphicsEllipseItem):
 
 
 class DrawingView(QGraphicsView):
-    perimeter_closed = Signal(list, float, float, int, int)  # points, perimeter_m, area_m2, full, partial  # points, perimeter_m, full_grid_boxes
+    perimeter_closed = Signal(list, float, float, list)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.scene = QGraphicsScene(-2000, -2000, 4000, 4000, self)
@@ -52,41 +63,34 @@ class DrawingView(QGraphicsView):
         self.setDragMode(QGraphicsView.RubberBandDrag)
         self.setCursor(Qt.ArrowCursor)
 
-        # Grid & zoom
-        self.scale_factor = 5   # pixels per meter
-        self.grid_meters  = 0.1
-        self.grid_size    = self.grid_meters * self.scale_factor
+        self.scale_factor = 5
+        self.grid_meters = 0.1
+        self.grid_size = self.grid_meters * self.scale_factor
 
-        # Snapping
         self.osnap_enabled = True
-        self.snap_tol_px   = 10
+        self.snap_tol_px = 10
 
-        # Modes
-        self.pointer_enabled  = True
+        self.pointer_enabled = True
         self.polyline_enabled = False
-        self.guide_enabled    = False
-        self.pan_enabled      = False
-        self.free_mode        = False
+        self.guide_enabled = False
+        self.pan_enabled = False
+        self.free_mode = False
 
-        # Perimeter lock
         self.perimeter_locked = False
 
-        # Drawing state
-        self.points        = []      # list of QPointF
-        self.perim_items   = []      # QGraphicsLineItem
-        self.point_items   = []      # DraggablePoint
-        self.length_items  = []      # QGraphicsSimpleTextItem
+        self.points = []
+        self.perim_items = []
+        self.point_items = []
+        self.length_items = []
 
-        self._guide_start  = None
-        self.guides        = []      # list of (start,end)
-        self.guide_items   = []      # QGraphicsLineItem
-        self.guide_labels  = []      # QGraphicsSimpleTextItem
+        self._guide_start = None
+        self.guides = []
+        self.guide_items = []
+        self.guide_labels = []
 
-        # Global undo/redo stack
         self.history = []
         self.future = []
 
-        # Snap marker
         self.snap_marker = QGraphicsEllipseItem(-5, -5, 10, 10)
         self.snap_marker.setPen(QPen(QColor("yellow"), 2))
         self.snap_marker.setBrush(Qt.NoBrush)
@@ -94,7 +98,6 @@ class DrawingView(QGraphicsView):
         self.scene.addItem(self.snap_marker)
         self.snap_marker.hide()
 
-        # Preview line & label
         self.preview_line = QGraphicsLineItem()
         self.preview_line.setPen(QPen(QColor("green"), 1, Qt.DashLine))
         self.preview_line.setZValue(1.5)
@@ -106,13 +109,386 @@ class DrawingView(QGraphicsView):
         self.scene.addItem(self.preview_label)
         self.preview_label.hide()
 
-        # Panning
-        self._panning   = False
+        self._panning = False
         self._pan_start = QPointF()
-
-        # Dimensional input (type length then Enter)
         self._dim_input = ""
         self.last_mouse_scene = QPointF()
+    def _fmt_measure(self, val, unit='m', decimals=2):
+        """Format a measurement: no decimals if effectively an integer, otherwise format with given decimals."""
+        try:
+            if val is None:
+                return "—"
+            v = float(val)
+            if abs(v - round(v)) < 1e-6:
+                return f"{int(round(v))} {unit}"
+            return f"{v:.{decimals}f} {unit}"
+        except Exception:
+            return str(val)
+
+    def _fmt_area(self, val, decimals=3):
+        try:
+            if val is None:
+                return "—"
+            v = float(val)
+            if abs(v - round(v)) < 1e-6:
+                return f"{int(round(v))} m²"
+            return f"{v:.{decimals}f} m²"
+        except Exception:
+            return str(val)
+    def _polygon_area_m2(self, pts):
+        if len(pts) < 3:
+            return 0.0
+        arr = list(pts)
+        if arr[0] != arr[-1]:
+            arr.append(arr[0])
+        s = 0.0
+        for i in range(len(arr) - 1):
+            x1, y1 = arr[i].x(), arr[i].y()
+            x2, y2 = arr[i + 1].x(), arr[i + 1].y()
+            s += x1 * y2 - x2 * y1
+        area_px2 = abs(s) * 0.5
+        return area_px2 / (self.scale_factor ** 2)
+
+    def close_perimeter(self):
+        if len(self.points) < 3:
+            QMessageBox.information(self, "Close Perimeter", "Need at least 3 points to close a perimeter.")
+            return
+        if self.points[0] != self.points[-1]:
+            self.save_state()
+            self.points.append(self.points[0])
+        self._refresh_perimeter()
+
+        # compute perimeter and area
+        perimeter_m = 0.0
+        for i in range(1, len(self.points)):
+            p0, p1 = self.points[i - 1], self.points[i]
+            perimeter_m += math.hypot(p1.x() - p0.x(), p1.y() - p0.y()) / self.scale_factor
+        area_m2 = self._polygon_area_m2(self.points)
+
+        # compute grid coverage
+        coverage = self.compute_grid_coverage(points=None, grid_w_m=5.0, grid_h_m=3.0)
+        partial_details = []
+        full_area = 0.0
+        partial_area_sum = 0.0
+        if coverage is not None:
+            partial_details = coverage.get('partial_details', [])
+            full_area = coverage.get('full_area_m2', 0.0)
+            partial_area_sum = sum((p.get('area_m2', 0.0) for p in partial_details))
+
+        total_box_area = full_area + partial_area_sum
+        diff = area_m2 - total_box_area
+
+        # Build concise popup: polygon area, boxes area vs partials, difference, and per-partial crossing lengths only
+        lines = [f"Polygon area: {self._fmt_area(area_m2)}",
+                 f"Full boxes area: {self._fmt_area(full_area)}",
+                 f"Partial boxes area (sum): {self._fmt_area(partial_area_sum)}",
+                 f"Boxes total area: {self._fmt_area(total_box_area)}",
+                 f"Difference (polygon - boxes): {self._fmt_area(diff)}",
+                 "",
+                 "Partial boxes (crossing lengths):"]
+        for p in partial_details:
+            gx, gy = p.get('grid', (None, None))
+            cl = p.get('boundary_crossing_length_m', 0.0)
+            lines.append(f"{(gx,gy)} crossing={self._fmt_measure(cl, decimals=2)}")
+
+        msg = "\n".join(lines)
+        if len(msg) > 15000:
+            msg = msg[:15000] + "\n...output truncated..."
+        QMessageBox.information(self, "Perimeter area & crossing diagnostics", msg)
+
+        self.perimeter_locked = True
+        self.toggle_pointer_mode(True)
+        self.perimeter_closed.emit(list(self.points), perimeter_m, area_m2, partial_details)
+
+    def _refresh_perimeter(self):
+        for ln in self.perim_items:
+            self.scene.removeItem(ln)
+        for lbl in self.length_items:
+            self.scene.removeItem(lbl)
+        for dot in self.point_items:
+            self.scene.removeItem(dot)
+        self.perim_items.clear()
+        self.length_items.clear()
+        self.point_items.clear()
+
+        for i, pt in enumerate(self.points):
+            dot = DraggablePoint(self, i, pt)
+            self.scene.addItem(dot)
+            self.point_items.append(dot)
+            if i > 0:
+                p0 = self.points[i - 1]
+                ln = QGraphicsLineItem(p0.x(), p0.y(), pt.x(), pt.y())
+                ln.setPen(QPen(QColor("green"), 2))
+                ln.setFlag(QGraphicsItem.ItemIsSelectable, True)
+                self.scene.addItem(ln)
+                self.perim_items.append(ln)
+                dist = math.hypot(pt.x() - p0.x(), pt.y() - p0.y()) / self.scale_factor
+                mid = QPointF((p0.x() + pt.x()) / 2, (p0.y() + pt.y()) / 2)
+                lbl = QGraphicsSimpleTextItem(self._fmt_measure(dist))
+                lbl.setPos(mid)
+                lbl.setZValue(1)
+                self.scene.addItem(lbl)
+                self.length_items.append(lbl)
+
+        # show closing preview label
+        if len(self.points) >= 3 and self.points[0] != self.points[-1]:
+            p_first = self.points[0]
+            p_last = self.points[-1]
+            closing_dist = math.hypot(p_first.x() - p_last.x(), p_first.y() - p_last.y()) / self.scale_factor
+            mid_closing = QPointF((p_first.x() + p_last.x()) / 2, (p_first.y() + p_last.y()) / 2)
+            lblc = QGraphicsSimpleTextItem(self._fmt_measure(closing_dist))
+            lblc.setPos(mid_closing + QPointF(6, -6))
+            lblc.setZValue(1)
+            lblc.setBrush(QBrush(QColor("darkGray")))
+            self.scene.addItem(lblc)
+            self.length_items.append(lblc)
+
+    def _refresh_guides(self):
+        for ln in self.guide_items:
+            self.scene.removeItem(ln)
+        for lbl in self.guide_labels:
+            self.scene.removeItem(lbl)
+        self.guide_items.clear()
+        self.guide_labels.clear()
+        for s, e in self.guides:
+            ln = QGraphicsLineItem(s.x(), s.y(), e.x(), e.y())
+            ln.setPen(QPen(QColor("red"), 1))
+            ln.setFlag(QGraphicsItem.ItemIsSelectable, True)
+            self.scene.addItem(ln)
+            self.guide_items.append(ln)
+            lbl = QGraphicsSimpleTextItem(self._fmt_measure(math.hypot(e.x() - s.x(), e.y() - s.y()) / self.scale_factor))
+            lbl.setBrush(QBrush(QColor("red")))
+            mid = QPointF((s.x() + e.x()) / 2, (s.y() + e.y()) / 2)
+            lbl.setPos(mid)
+            lbl.setZValue(1)
+            self.scene.addItem(lbl)
+            self.guide_labels.append(lbl)
+
+    def save_state(self):
+        state = {"points": list(self.points), "guides": list(self.guides)}
+        self.history.append(state)
+        self.future.clear()
+
+    def restore_state(self, state):
+        self.points = list(state["points"])
+        self.guides = list(state["guides"])
+        self._refresh_perimeter()
+        self._refresh_guides()
+
+    def undo(self):
+        if len(self.history) < 2:
+            return
+        self.future.append(self.history.pop())
+        self.restore_state(self.history[-1])
+
+    def redo(self):
+        if not self.future:
+            return
+        state = self.future.pop()
+        self.history.append(state)
+        self.restore_state(state)
+
+    def drawBackground(self, painter: QPainter, rect: QRectF):
+        pen = QPen(QColor(220, 220, 220), 1)
+        painter.setPen(pen)
+        grid_x = 5 * self.scale_factor
+        grid_y = 3 * self.scale_factor
+
+        left = int(rect.left() / grid_x) * grid_x
+        right = rect.right()
+        top = int(rect.top() / grid_y) * grid_y
+        bottom = rect.bottom()
+
+        x = left
+        while x < right:
+            painter.drawLine(x, rect.top(), x, rect.bottom())
+            x += grid_x
+
+        y = top
+        while y < bottom:
+            painter.drawLine(rect.left(), y, rect.right(), y)
+            y += grid_y
+
+        # small labels
+        try:
+            font = QFont()
+            font.setPointSize(8)
+            painter.setFont(font)
+        except Exception:
+            pass
+        label_pen = QPen(QColor(100, 100, 100))
+        painter.setPen(label_pen)
+        x = left
+        while x < right:
+            gx = int(math.floor(x / grid_x))
+            painter.drawText(x + 4, rect.top() + 12, str(gx))
+            x += grid_x
+        y = top
+        while y < bottom:
+            gy = int(math.floor(y / grid_y))
+            painter.drawText(rect.left() + 4, y + 12, str(gy))
+            y += grid_y
+
+    def compute_grid_coverage(self, points=None, grid_w_m: float = 5.0, grid_h_m: float = 3.0, scale_factor=None):
+        # Delegate to centralized geometry utilities (services.geometry_utils)
+        if scale_factor is None:
+            scale_factor = self.scale_factor
+        grid_w = grid_w_m * scale_factor
+        grid_h = grid_h_m * scale_factor
+        if points is None:
+            pts = [(p.x(), p.y()) for p in self.points]
+        else:
+            pts = [(float(x), float(y)) for (x, y) in points]
+        if len(pts) < 3:
+            return None
+
+        from shapely.geometry import Polygon, box as shapely_box
+        poly = Polygon(pts)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+
+        poly_area_px2 = poly.area
+        poly_area_m2 = poly_area_px2 / (scale_factor * scale_factor)
+
+        # bounding grid indices
+        xs = [x for x, _ in pts]
+        ys = [y for _, y in pts]
+        minx, maxx = min(xs), max(xs)
+        miny, maxy = min(ys), max(ys)
+        gx0 = int((minx) // grid_w) - 1
+        gy0 = int((miny) // grid_h) - 1
+        gx1 = int((maxx) // grid_w) + 2
+        gy1 = int((maxy) // grid_h) + 2
+
+        full_count = 0
+        full_area_px2 = 0.0
+        partial_details = []
+        for gy in range(gy0, gy1):
+            y0 = gy * grid_h
+            y1 = y0 + grid_h
+            for gx in range(gx0, gx1):
+                x0 = gx * grid_w
+                x1 = x0 + grid_w
+                cell = shapely_box(x0, y0, x1, y1)
+                inter = poly.intersection(cell)
+                if inter.is_empty:
+                    continue
+                if inter.equals(cell):
+                    full_count += 1
+                    full_area_px2 += cell.area
+                else:
+                    # filter negligible
+                    if inter.area <= max(1e-6, 1e-6 * cell.area):
+                        continue
+                    area_m2 = inter.area / (scale_factor * scale_factor)
+                    # compute length of polygon boundary inside the cell (px), convert to meters
+                    try:
+                        # total boundary inside the cell
+                        boundary_in_cell = poly.boundary.intersection(cell)
+                        if boundary_in_cell.is_empty:
+                            boundary_len_px = 0.0
+                            segment_lengths_m = []
+                        else:
+                            segment_lengths_m = []
+                            geoms = getattr(boundary_in_cell, 'geoms', [boundary_in_cell])
+                            for g in geoms:
+                                try:
+                                    if not (hasattr(g, 'length') and g.length):
+                                        continue
+                                    if g.geom_type not in ('LineString', 'LinearRing'):
+                                        continue
+                                    seg_len_m = g.length / scale_factor
+                                    segment_lengths_m.append(seg_len_m)
+                                except Exception:
+                                    continue
+                            boundary_len_px = sum((l * scale_factor for l in segment_lengths_m)) if segment_lengths_m else 0.0
+
+                        inner_eps = max(1e-6, min(grid_w, grid_h) * 1e-6)
+                        try:
+                            inner_cell = shapely_box(x0 + inner_eps, y0 + inner_eps, x1 - inner_eps, y1 - inner_eps)
+                            crossing = poly.boundary.intersection(inner_cell)
+                            crossing_segments_m = []
+                            if not crossing.is_empty:
+                                cgeoms = getattr(crossing, 'geoms', [crossing])
+                                for cg in cgeoms:
+                                    try:
+                                        if hasattr(cg, 'length') and cg.length and cg.geom_type in ('LineString', 'LinearRing'):
+                                            crossing_segments_m.append(cg.length / scale_factor)
+                                    except Exception:
+                                        continue
+                        except Exception:
+                            crossing_segments_m = []
+                    except Exception:
+                        boundary_len_px = 0.0
+                        segment_lengths_m = []
+                        crossing_segments_m = []
+                    boundary_len_m = boundary_len_px / scale_factor if scale_factor and scale_factor != 0 else 0.0
+                    crossing_len_m = sum(crossing_segments_m) if crossing_segments_m else 0.0
+                    partial_details.append({
+                        'grid': (gx, gy),
+                        'area_m2': area_m2,
+                        'boundary_length_m': boundary_len_m,              # total boundary length inside cell
+                        'boundary_crossing_length_m': crossing_len_m,    # length of non-edge (crossing) pieces
+                        'boundary_segments_m': segment_lengths_m,
+                        'boundary_crossing_segments_m': crossing_segments_m,
+                        'boundary_num_segments': len(segment_lengths_m),
+                        'boundary_num_crossing_segments': len(crossing_segments_m),
+                        'shape': inter
+                    })
+
+        full_area_m2 = full_area_px2 / (scale_factor * scale_factor)
+        return {
+            'polygon_area_m2': poly_area_m2,
+            'full_count': full_count,
+            'full_area_m2': full_area_m2,
+            'partial_details': partial_details,
+        }
+
+    def compute_grid_box_counts(self, points=None, grid_w_m: float = 5.0, grid_h_m: float = 3.0, scale_factor=None):
+        if scale_factor is None:
+            scale_factor = self.scale_factor
+        grid_w = grid_w_m * scale_factor
+        grid_h = grid_h_m * scale_factor
+        if points is None:
+            pts = [(p.x(), p.y()) for p in self.points]
+        else:
+            pts = [(float(x), float(y)) for (x, y) in points]
+        if len(pts) < 3:
+            return []
+
+        from shapely.geometry import Polygon, box as shapely_box
+        poly = Polygon(pts)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+
+        xs = [x for x, _ in pts]
+        ys = [y for _, y in pts]
+        minx, maxx = min(xs), max(xs)
+        miny, maxy = min(ys), max(ys)
+        gx0 = int((minx) // grid_w) - 1
+        gy0 = int((miny) // grid_h) - 1
+        gx1 = int((maxx) // grid_w) + 2
+        gy1 = int((maxy) // grid_h) + 2
+        partial_details = []
+        for gy in range(gy0, gy1):
+            y0 = gy * grid_h
+            y1 = y0 + grid_h
+            for gx in range(gx0, gx1):
+                x0 = gx * grid_w
+                x1 = x0 + grid_w
+                cell = shapely_box(x0, y0, x1, y1)
+                inter = poly.intersection(cell)
+                if inter.is_empty or inter.equals(cell):
+                    continue
+                cell_area = cell.area
+                if inter.area <= max(1e-6, 1e-6 * cell_area):
+                    continue
+                partial_details.append({
+                    'grid': (gx, gy),
+                    'intersection_area': inter.area,
+                    'intersection_shape': inter
+                })
+        return partial_details
     def _commit_dimensional_segment(self, length_m: float, alt_held: bool, free_mode: bool):
         """
         Commit a segment with exact length in meters.
@@ -529,7 +905,7 @@ class DrawingView(QGraphicsView):
             self.preview_line.setLine(ref.x(), ref.y(), target.x(), target.y())
             dist = math.hypot(target.x() - ref.x(), target.y() - ref.y()) / self.scale_factor
             mid = QPointF((ref.x() + target.x()) / 2, (ref.y() + target.y()) / 2)
-            self.preview_label.setPlainText(f"{dist:.2f} m")
+            self.preview_label.setPlainText(self._fmt_measure(dist))
             self.preview_label.setPos(mid)
             self.preview_line.show()
             self.preview_label.show()
@@ -705,7 +1081,6 @@ class DrawingView(QGraphicsView):
     def segs_intersect(self, a1, a2, b1, b2):
         """Check if two line segments intersect with stricter conditions."""
         EPS = 1e-7  # Tolerance for floating-point comparisons
-
         def orient(ax, ay, bx, by, cx, cy):
             return (by - ay) * (cx - bx) - (bx - ax) * (cy - by)
 
@@ -725,13 +1100,9 @@ class DrawingView(QGraphicsView):
         d4 = orient(x3, y3, x4, y4, x2, y2)
 
         # Check if segments straddle each other
-        if (
-            ((d1 > EPS and d2 < -EPS) or (d1 < -EPS and d2 > EPS))
-            and ((d3 > EPS and d4 < -EPS) or (d3 < -EPS and d4 > EPS))
-        ):
+        if (((d1 > EPS and d2 < -EPS) or (d1 < -EPS and d2 > EPS))
+                and ((d3 > EPS and d4 < -EPS) or (d3 < -EPS and d4 > EPS))):
             return True
-
-        # Check if segments are collinear and overlap
         if abs(d1) <= EPS and on_seg(x1, y1, x2, y2, x3, y3):
             return True
         if abs(d2) <= EPS and on_seg(x1, y1, x2, y2, x4, y4):
@@ -758,34 +1129,6 @@ class DrawingView(QGraphicsView):
             area_px2 = abs(s) * 0.5
             return area_px2 / (self.scale_factor ** 2)
 
-    def close_perimeter(self):
-                """Close the current perimeter (if open), lock drawing, and emit perimeter/grid/area info."""
-                if len(self.points) < 3:
-                    QMessageBox.information(self, "Close Perimeter", "Need at least 3 points to close a perimeter.")
-                    return
-                if self.points[0] != self.points[-1]:
-                    self.save_state()
-                    self.points.append(self.points[0])
-                self._refresh_perimeter()
-
-                # Calculate perimeter length in meters
-                perimeter_m = 0.0
-                for i in range(1, len(self.points)):
-                    p0, p1 = self.points[i-1], self.points[i]
-                    perimeter_m += math.hypot(p1.x()-p0.x(), p1.y()-p0.y()) / self.scale_factor
-
-                # Area in square meters
-                area_m2 = self._polygon_area_m2(self.points)
-
-                # Grid boxes
-                full, partial = self.compute_grid_box_counts()
-
-                # Hard lock drawing until Clear All
-                self.perimeter_locked = True
-                self.toggle_pointer_mode(True)
-
-                # Emit extended data
-                self.perimeter_closed.emit(list(self.points), perimeter_m, area_m2, full, partial)
     def _refresh_perimeter(self):
         for ln in self.perim_items:
             self.scene.removeItem(ln)
@@ -894,13 +1237,148 @@ class DrawingView(QGraphicsView):
         if len(self.points) < 3:
             QMessageBox.information(self, "Grid Coverage", "Draw at least 3 points to form a perimeter first.")
             return
-        full, partial = self.compute_grid_box_counts()
+        # Compute detailed coverage using shapely-based helper
+        coverage = self.compute_grid_coverage(points=None, grid_w_m=5.0, grid_h_m=3.0)
+        if coverage is None:
+            QMessageBox.information(self, "Grid Coverage", "Could not compute grid coverage.")
+            return
+        poly_area_m2 = coverage['polygon_area_m2']
+        full_count = coverage['full_count']
+        full_area_m2 = coverage['full_area_m2']
+        partial_details = coverage['partial_details']
+        partial_count = len(partial_details)
+        partial_area_m2 = sum(p['area_m2'] for p in partial_details)
+
         msg = (
-            f"Complete grid boxes: {full}\n"
-            f"Partial grid boxes:  {partial}\n\n"
+            f"Polygon area: {poly_area_m2:.3f} m²\n"
+            f"Full boxes: {full_count} (area {full_area_m2:.3f} m²)\n"
+            f"Partial boxes: {partial_count} (area {partial_area_m2:.3f} m²)\n\n"
+            f"Sum full+partial area: {(full_area_m2 + partial_area_m2):.3f} m²\n"
             f"Grid size: 5m x 3m"
         )
         QMessageBox.information(self, "Grid Coverage", msg)
+
+    def compute_grid_coverage(self, points=None, grid_w_m: float = 5.0, grid_h_m: float = 3.0, scale_factor=None):
+        """
+        Return a detailed coverage report:
+          - polygon_area_m2
+          - full_count, full_area_m2
+          - partial_details: list of {grid, area_m2, shape}
+        """
+        if scale_factor is None:
+            scale_factor = self.scale_factor
+        grid_w = grid_w_m * scale_factor
+        grid_h = grid_h_m * scale_factor
+        if points is None:
+            pts = [(p.x(), p.y()) for p in self.points]
+        else:
+            pts = [(float(x), float(y)) for (x, y) in points]
+        if len(pts) < 3:
+            return None
+
+        from shapely.geometry import Polygon, box as shapely_box
+        poly = Polygon(pts)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+
+        poly_area_px2 = poly.area
+        poly_area_m2 = poly_area_px2 / (scale_factor * scale_factor)
+
+        # bounding grid indices
+        xs = [x for x, _ in pts]
+        ys = [y for _, y in pts]
+        minx, maxx = min(xs), max(xs)
+        miny, maxy = min(ys), max(ys)
+        gx0 = int((minx) // grid_w) - 1
+        gy0 = int((miny) // grid_h) - 1
+        gx1 = int((maxx) // grid_w) + 2
+        gy1 = int((maxy) // grid_h) + 2
+
+        full_count = 0
+        full_area_px2 = 0.0
+        partial_details = []
+        for gy in range(gy0, gy1):
+            y0 = gy * grid_h
+            y1 = y0 + grid_h
+            for gx in range(gx0, gx1):
+                x0 = gx * grid_w
+                x1 = x0 + grid_w
+                cell = shapely_box(x0, y0, x1, y1)
+                inter = poly.intersection(cell)
+                if inter.is_empty:
+                    continue
+                if inter.equals(cell):
+                    full_count += 1
+                    full_area_px2 += cell.area
+                else:
+                    # filter negligible
+                    if inter.area <= max(1e-6, 1e-6 * cell.area):
+                        continue
+                    area_m2 = inter.area / (scale_factor * scale_factor)
+                    # compute length of polygon boundary inside the cell (px), convert to meters
+                    try:
+                        # total boundary inside the cell
+                        boundary_in_cell = poly.boundary.intersection(cell)
+                        if boundary_in_cell.is_empty:
+                            boundary_len_px = 0.0
+                            segment_lengths_m = []
+                        else:
+                            segment_lengths_m = []
+                            geoms = getattr(boundary_in_cell, 'geoms', [boundary_in_cell])
+                            for g in geoms:
+                                try:
+                                    if not (hasattr(g, 'length') and g.length):
+                                        continue
+                                    if g.geom_type not in ('LineString', 'LinearRing'):
+                                        continue
+                                    seg_len_m = g.length / scale_factor
+                                    segment_lengths_m.append(seg_len_m)
+                                except Exception:
+                                    continue
+                            boundary_len_px = sum((l * scale_factor for l in segment_lengths_m)) if segment_lengths_m else 0.0
+
+                        # crossing-only: intersect boundary with an inner-shrunk cell to exclude pieces coincident with edges
+                        # choose a tiny shrink relative to grid cell size
+                        inner_eps = max(1e-6, min(grid_w, grid_h) * 1e-6)
+                        try:
+                            inner_cell = shapely_box(x0 + inner_eps, y0 + inner_eps, x1 - inner_eps, y1 - inner_eps)
+                            crossing = poly.boundary.intersection(inner_cell)
+                            crossing_segments_m = []
+                            if not crossing.is_empty:
+                                cgeoms = getattr(crossing, 'geoms', [crossing])
+                                for cg in cgeoms:
+                                    try:
+                                        if hasattr(cg, 'length') and cg.length and cg.geom_type in ('LineString', 'LinearRing'):
+                                            crossing_segments_m.append(cg.length / scale_factor)
+                                    except Exception:
+                                        continue
+                        except Exception:
+                            crossing_segments_m = []
+                    except Exception:
+                        boundary_len_px = 0.0
+                        segment_lengths_m = []
+                        crossing_segments_m = []
+                    boundary_len_m = boundary_len_px / scale_factor if scale_factor and scale_factor != 0 else 0.0
+                    crossing_len_m = sum(crossing_segments_m) if crossing_segments_m else 0.0
+                    partial_details.append({
+                        'grid': (gx, gy),
+                        'area_m2': area_m2,
+                        'boundary_length_m': boundary_len_m,              # total boundary length inside cell
+                        'boundary_crossing_length_m': crossing_len_m,    # length of non-edge (crossing) pieces
+                        'boundary_segments_m': segment_lengths_m,
+                        'boundary_crossing_segments_m': crossing_segments_m,
+                        'boundary_num_segments': len(segment_lengths_m),
+                        'boundary_num_crossing_segments': len(crossing_segments_m),
+                        'shape': inter
+                    })
+
+        full_area_m2 = full_area_px2 / (scale_factor * scale_factor)
+        return {
+            'polygon_area_m2': poly_area_m2,
+            'full_count': full_count,
+            'full_area_m2': full_area_m2,
+            'partial_details': partial_details,
+        }
 
     
     def compute_grid_box_counts(self, points=None, grid_w_m: float = 5.0, grid_h_m: float = 3.0, scale_factor=None):
@@ -924,8 +1402,11 @@ class DrawingView(QGraphicsView):
             pts = [(float(x), float(y)) for (x, y) in points]
         if len(pts) < 3:
             return 0, 0
-        if pts[0] != pts[-1]:
-            pts = pts + [pts[0]]
+        # Use Shapely for polygon operations
+        from shapely.geometry import Polygon, box as shapely_box
+        poly = Polygon(pts)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
 
         # Helpers
         def point_on_seg(px, py, x1, y1, x2, y2):
@@ -956,8 +1437,6 @@ class DrawingView(QGraphicsView):
 
         def poly_intersects_rect(x0, y0, x1, y1):
             """Check if the polygon intersects the rectangle."""
-            print(f"Checking intersection for rect: ({x0}, {y0}), ({x1}, {y1})")
-
             # Any polygon edge intersects rectangle edges?
             rect_edges = [
                 ((x0, y0), (x1, y0)),
@@ -969,23 +1448,19 @@ class DrawingView(QGraphicsView):
                 a1, a2 = pts[i], pts[i + 1]
                 for e in rect_edges:
                     if self.segs_intersect(a1, a2, e[0], e[1]):
-                        print("Edge intersects rectangle")
                         return True
 
             # Check if the rectangle is partially contained (at least one corner inside polygon)
             corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
             inside_corners = [point_in_poly(cx, cy) for cx, cy in corners]
             if any(inside_corners) and not all(inside_corners):
-                print("Rectangle partially contained")
                 return True
 
             # Check if the rectangle fully contains the polygon (midpoint test)
             mx, my = (x0 + x1) * 0.5, (y0 + y1) * 0.5
             if point_in_poly(mx, my):
-                print("Midpoint inside polygon")
                 return True
 
-            print("No intersection")
             return False
 
         # Iterate grid cells covering bounding box of the polygon
@@ -998,23 +1473,25 @@ class DrawingView(QGraphicsView):
         gy0 = int((miny) // grid_h) - 1
         gx1 = int((maxx) // grid_w) + 2
         gy1 = int((maxy) // grid_h) + 2
-        full = 0
-        partial = 0
+        partial_details = []  # List of dicts for partial (cut) boxes
         for gy in range(gy0, gy1):
             y0 = gy * grid_h
             y1 = y0 + grid_h
             for gx in range(gx0, gx1):
                 x0 = gx * grid_w
                 x1 = x0 + grid_w
-                corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
-                inside_flags = [point_in_poly(cx, cy) for (cx, cy) in corners]
-                if all(inside_flags):
-                    print(f"Full box at grid ({gx}, {gy})")
-                    full += 1
-                elif poly_intersects_rect(x0, y0, x1, y1):
-                    print(f"Partial box at grid ({gx}, {gy})")
-                    partial += 1
-                else:
-                    print(f"Empty box at grid ({gx}, {gy})")
-
-        return full, partial
+                cell = shapely_box(x0, y0, x1, y1)
+                inter = poly.intersection(cell)
+                if inter.is_empty or inter.equals(cell):
+                    continue
+                # Filter out negligible intersections (lines/points or numerical noise)
+                # Compute a small tolerance relative to cell area
+                cell_area = cell.area
+                if inter.area <= max(1e-6, 1e-6 * cell_area):
+                    continue
+                partial_details.append({
+                    'grid': (gx, gy),
+                    'intersection_area': inter.area,
+                    'intersection_shape': inter
+                })
+        return partial_details
