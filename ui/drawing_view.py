@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsEllipseItem,
     QGraphicsLineItem,
+    QGraphicsPolygonItem,
     QGraphicsTextItem,
     QGraphicsSimpleTextItem,
     QInputDialog,
@@ -13,8 +14,11 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QAction, QFont
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal
+from PySide6.QtGui import QPolygonF
 from services.geometry_utils import (
     compute_grid_coverage as geom_compute_grid_coverage,
+    find_north_south_segments,
+    estimate_triangle_posts_3x5_with_sides,
 )
 
 EPS = 1e-7
@@ -85,6 +89,11 @@ class DrawingView(QGraphicsView):
         self.perim_items = []
         self.point_items = []
         self.length_items = []
+        # Triangular braces/items drawn after perimeter close
+        self.tri_items = []  # type: list[QGraphicsItem]
+        # North arrow is painted as a fixed overlay in drawForeground
+        # Default greenhouse type (grid 3x5 with sides)
+        self.greenhouse_type = "3x5_with_sides"
 
         self._guide_start = None
         self.guides = []
@@ -116,6 +125,9 @@ class DrawingView(QGraphicsView):
         self._pan_start = QPointF()
         self._dim_input = ""
         self.last_mouse_scene = QPointF()
+        # Greenhouse grid dimensions in meters (configurable at runtime)
+        self.grid_w_m = 5.0  # width of one box (columns)
+        self.grid_h_m = 3.0  # height of one box (rows)
     def _fmt_measure(self, val, unit='m', decimals=2):
         """Format a measurement: no decimals if effectively an integer, otherwise format with given decimals."""
         try:
@@ -157,7 +169,12 @@ class DrawingView(QGraphicsView):
         area_m2 = self._polygon_area_m2(self.points)
         # compute grid coverage via services
         pts = [(p.x(), p.y()) for p in self.points]
-        coverage = geom_compute_grid_coverage(pts, grid_w_m=5.0, grid_h_m=3.0, scale_factor=self.scale_factor)
+        coverage = geom_compute_grid_coverage(
+            pts,
+            grid_w_m=getattr(self, 'grid_w_m', 5.0),
+            grid_h_m=getattr(self, 'grid_h_m', 3.0),
+            scale_factor=self.scale_factor,
+        )
         partial_details = []
         full_area = 0.0
         partial_area_sum = 0.0
@@ -182,28 +199,43 @@ class DrawingView(QGraphicsView):
             cl = p.get('boundary_crossing_length_m', 0.0)
             lines.append(f"{(gx,gy)} crossing={self._fmt_measure(cl, decimals=2)}")
 
+        # Append posts estimation (3x5 with sides) into the same popup
+        try:
+            est = estimate_triangle_posts_3x5_with_sides(
+                pts,
+                grid_w_m=getattr(self, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self, 'grid_h_m', 3.0),
+                scale_factor=self.scale_factor,
+            )
+            if est:
+                lines += [
+                    "",
+                    "Posts estimation (3x5 with sides):",
+                    f"Width: {est['north_width_m']:.2f} m, Depth: {est['depth_m']:.2f} m",
+                    f"Rows: {est['rows']}",
+                    f"Full triangles/row: {est['full_triangles_per_row']}, Half/row: {int(est['has_half_triangle_per_row'])}",
+                    f"Low posts/row: {est['low_posts_per_row']}, Tall posts/row: {est['tall_posts_per_row']}",
+                    f"Total low posts: {est['total_low_posts']}, Total tall posts: {est['total_tall_posts']}",
+                ]
+        except Exception:
+            pass
+
         msg = "\n".join(lines)
         if len(msg) > 15000:
             msg = msg[:15000] + "\n...output truncated..."
         QMessageBox.information(self, "Perimeter area & crossing diagnostics", msg)
 
+        # Draw greenhouse type-specific features (default: 3x5 with sides)
+        try:
+            self._clear_triagonals()
+            self._draw_north_triagonals()
+        except Exception:
+            pass
+
         self.perimeter_locked = True
         self.toggle_pointer_mode(True)
         self.perimeter_closed.emit(list(self.points), perimeter_m, area_m2, partial_details)
 
-    # ...existing code...
-
-    # ...existing code...
-
-    # ...existing code...
-
-    # ...existing code...
-
-    # ...existing code...
-
-    # ...existing code...
-
-    # ...existing code...
     def _commit_dimensional_segment(self, length_m: float, alt_held: bool, free_mode: bool):
         """
         Commit a segment with exact length in meters.
@@ -312,9 +344,9 @@ class DrawingView(QGraphicsView):
     def drawBackground(self, painter: QPainter, rect: QRectF):
         pen = QPen(QColor(220, 220, 220), 1)
         painter.setPen(pen)
-        # Greenhouse grid: 5m between columns (vertical), 3m between rows (horizontal)
-        grid_x = 5 * self.scale_factor  # 5 meters horizontally (columns)
-        grid_y = 3 * self.scale_factor  # 3 meters vertically (rows)
+        # Greenhouse grid spacing in pixels (configurable)
+        grid_x = getattr(self, 'grid_w_m', 5.0) * self.scale_factor
+        grid_y = getattr(self, 'grid_h_m', 3.0) * self.scale_factor
 
         # Find first vertical and horizontal grid line in view
         left = int(rect.left() / grid_x) * grid_x
@@ -418,15 +450,15 @@ class DrawingView(QGraphicsView):
             self.toggle_pointer_mode(True)
 
     def snap_to_greenhouse_grid(self, scene_p: QPointF) -> QPointF:
-        grid_x = 5 * self.scale_factor
-        grid_y = 3 * self.scale_factor
+        grid_x = getattr(self, 'grid_w_m', 5.0) * self.scale_factor
+        grid_y = getattr(self, 'grid_h_m', 3.0) * self.scale_factor
         x = round(scene_p.x() / grid_x) * grid_x
         y = round(scene_p.y() / grid_y) * grid_y
         return QPointF(x, y)
 
     def snap_to_greenhouse_grid_or_edge_mid_if_close(self, scene_p: QPointF, view_p: QPointF, snap_tol_px=12):
-        grid_x = 5 * self.scale_factor
-        grid_y = 3 * self.scale_factor
+        grid_x = getattr(self, 'grid_w_m', 5.0) * self.scale_factor
+        grid_y = getattr(self, 'grid_h_m', 3.0) * self.scale_factor
 
         # Nearest grid intersection
         gx = round(scene_p.x() / grid_x) * grid_x
@@ -467,6 +499,17 @@ class DrawingView(QGraphicsView):
         # Clear any live dimension entry on click
         self._dim_input = ""
         self.preview_label.hide()
+        # Ctrl+Click on triangles toggles their 'open' (window) state — re-added per user request
+        if event.button() == Qt.LeftButton and (event.modifiers() & Qt.ControlModifier):
+            itm = self.itemAt(event.pos())
+            if itm:
+                # Walk up to a known triangle polygon in tri_items
+                tri = itm
+                while tri is not None and tri not in self.tri_items:
+                    tri = tri.parentItem()
+                if tri in self.tri_items:
+                    self._toggle_triangle_open(tri)
+                    return
         # If perimeter is locked, restrict to selection and panning; ignore creation clicks
         if getattr(self, 'perimeter_locked', False):
             if event.button() == Qt.MiddleButton:
@@ -486,8 +529,8 @@ class DrawingView(QGraphicsView):
         scene_p = self.mapToScene(view_p)
         snap_pt, snap_type = self.snap_to_greenhouse_grid_or_edge_mid_if_close(scene_p, view_p)
 
-        grid_x = 5 * self.scale_factor
-        grid_y = 3 * self.scale_factor
+        grid_x = getattr(self, 'grid_w_m', 5.0) * self.scale_factor
+        grid_y = getattr(self, 'grid_h_m', 3.0) * self.scale_factor
         nearest_grid = QPointF(
             round(scene_p.x() / grid_x) * grid_x,
             round(scene_p.y() / grid_y) * grid_y
@@ -505,10 +548,26 @@ class DrawingView(QGraphicsView):
 
         self.snap_marker.setPen(QPen(QColor(color), 3))
         self.snap_marker.setRect(marker_pt.x() - 7, marker_pt.y() - 7, 14, 14)
-        self.snap_marker.show()
+        # If pointer mode is active, hide the snap marker entirely
+        if self.pointer_enabled:
+            self.snap_marker.hide()
+        else:
+            self.snap_marker.show()
 
 
         if self.pointer_enabled and event.button() == Qt.LeftButton:
+            # If clicking a triangle while in pointer mode, toggle selection-for-window
+            # Ignore Ctrl modifier so Ctrl+Click does not pick triangles
+            if not (event.modifiers() & Qt.ControlModifier):
+                itm = self.itemAt(view_p)
+                if itm:
+                    tri = itm
+                    while tri is not None and tri not in self.tri_items:
+                        tri = tri.parentItem()
+                    if tri in self.tri_items:
+                        # toggle selection-for-window
+                        self._select_triangle(tri)
+                        return
             return super().mousePressEvent(event)
 
         # Guide-line mode
@@ -576,8 +635,8 @@ class DrawingView(QGraphicsView):
         self.last_mouse_scene = scene_p
         snap_pt, snap_type = self.snap_to_greenhouse_grid_or_edge_mid_if_close(scene_p, view_p)
 
-        grid_x = 5 * self.scale_factor
-        grid_y = 3 * self.scale_factor
+        grid_x = getattr(self, 'grid_w_m', 5.0) * self.scale_factor
+        grid_y = getattr(self, 'grid_h_m', 3.0) * self.scale_factor
         nearest_grid = QPointF(
             round(scene_p.x() / grid_x) * grid_x,
             round(scene_p.y() / grid_y) * grid_y
@@ -595,7 +654,10 @@ class DrawingView(QGraphicsView):
 
         self.snap_marker.setPen(QPen(QColor(color), 3))
         self.snap_marker.setRect(marker_pt.x() - 7, marker_pt.y() - 7, 14, 14)
-        self.snap_marker.show()
+        if not (self.pointer_enabled and snap_type in ("grid", "mid")):
+            self.snap_marker.show()
+        else:
+            self.snap_marker.hide()
 
 
         # Polyline preview (free, always follows mouse)
@@ -830,19 +892,19 @@ class DrawingView(QGraphicsView):
         return False
 
     def _polygon_area_m2(self, pts):
-            """Return area (m^2) of polygon given by list of QPointF (closed or open)."""
-            if len(pts) < 3:
-                return 0.0
-            arr = list(pts)
-            if arr[0] != arr[-1]:
-                arr.append(arr[0])
-            s = 0.0
-            for i in range(len(arr)-1):
-                x1, y1 = arr[i].x(), arr[i].y()
-                x2, y2 = arr[i+1].x(), arr[i+1].y()
-                s += x1*y2 - x2*y1
-            area_px2 = abs(s) * 0.5
-            return area_px2 / (self.scale_factor ** 2)
+        """Return area (m^2) of polygon given by list of QPointF (closed or open)."""
+        if len(pts) < 3:
+            return 0.0
+        arr = list(pts)
+        if arr[0] != arr[-1]:
+            arr.append(arr[0])
+        s = 0.0
+        for i in range(len(arr)-1):
+            x1, y1 = arr[i].x(), arr[i].y()
+            x2, y2 = arr[i+1].x(), arr[i+1].y()
+            s += x1*y2 - x2*y1
+        area_px2 = abs(s) * 0.5
+        return area_px2 / (self.scale_factor ** 2)
 
     def _refresh_perimeter(self):
         for ln in self.perim_items:
@@ -874,6 +936,46 @@ class DrawingView(QGraphicsView):
                 self.scene.addItem(lbl)
                 self.length_items.append(lbl)
 
+        # No-op for north arrow here; it's drawn as an overlay in drawForeground
+
+    def drawForeground(self, painter: QPainter, rect: QRectF):
+        # Paint a simple North arrow overlay (like a map) at the view's top-right corner
+        painter.save()
+        try:
+            # Reset transforms to device (viewport) coordinates
+            painter.resetTransform()
+            vw = self.viewport().width()
+            vh = self.viewport().height()
+            # Clip to the viewport to avoid partial clipping from scene rect
+            painter.setClipping(True)
+            painter.setClipRect(0, 0, vw, vh)
+
+            # A slightly larger arrow, inset a bit more to the left
+            margin = 16
+            stem_len = 34
+            head = 10
+            # Keep arrow head within borders by offsetting with head size and extra left offset
+            x = vw - (margin + head + 8)   # right inset and left shift
+            y = (margin + head)            # top inset
+
+            pen = QPen(QColor("#1f77b4"), 2)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(pen)
+            # Stem
+            painter.drawLine(x, y + stem_len, x, y)
+            # Arrow head
+            painter.drawLine(x - head, y + head, x, y)
+            painter.drawLine(x + head, y + head, x, y)
+            # Label N
+            font = QFont()
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(int(x + head + 8), int(y + 6), "N")
+        finally:
+            painter.restore()
+        # Call base to ensure default behavior
+        return super().drawForeground(painter, rect)
+
     def _refresh_guides(self):
         # Remove ALL old lines and labels
         for ln in self.guide_items:
@@ -899,6 +1001,122 @@ class DrawingView(QGraphicsView):
             self.scene.addItem(lbl)
             self.guide_labels.append(lbl)
 
+    def _clear_triagonals(self):
+        if not self.tri_items:
+            return
+        for it in list(self.tri_items):
+            try:
+                self.scene.removeItem(it)
+            except Exception:
+                pass
+        self.tri_items.clear()
+
+    def _toggle_triangle_open(self, tri_item: QGraphicsPolygonItem):
+        """Toggle visual 'open' state for a triangle (window)."""
+        try:
+            is_open = getattr(tri_item, '_is_open', False)
+            if not is_open:
+                # open: fill with a light blue and slightly lower opacity
+                tri_item.setBrush(QBrush(QColor(173, 216, 230, 160)))
+                tri_item.setOpacity(0.9)
+                tri_item._is_open = True
+            else:
+                # closed: remove fill
+                tri_item.setBrush(Qt.NoBrush)
+                tri_item.setOpacity(1.0)
+                tri_item._is_open = False
+        except Exception:
+            pass
+
+    def _select_triangle(self, tri_item: QGraphicsPolygonItem, toggle: bool = True):
+        """Mark triangle as selected-for-windowing (visual flag). If toggle is True, flip the state."""
+        try:
+            sel = getattr(tri_item, '_selected_for_window', False)
+            if toggle:
+                sel = not sel
+            tri_item._selected_for_window = sel
+            if sel:
+                # highlight selection with a brighter blue pen
+                pen = QPen(QColor(30, 144, 255), 3)
+                tri_item.setPen(pen)
+            else:
+                # restore base pen
+                base = getattr(tri_item, '_base_pen', QPen(QColor('#555'), 2))
+                tri_item.setPen(base)
+        except Exception:
+            pass
+
+    def _draw_north_triagonals(self):
+        """Draw triangular lines along the north side every 2 grid boxes (10m).
+        If leftover >= one box (5m), draw a half triangle.
+        """
+        if len(self.points) < 3:
+            return
+        # Resolve north horizontal segment
+        pts = [(p.x(), p.y()) for p in self.points]
+        ns = find_north_south_segments(pts, tolerance_px=0.5)
+        north = ns.get("north") if ns else None
+        if not north:
+            return
+        (x1, y1) = north["p1"]
+        (x2, y2) = north["p2"]
+        # Normalize left/right
+        if x2 < x1:
+            x1, x2 = x2, x1
+            y1, y2 = y2, y1
+        y0 = 0.5 * (y1 + y2)
+
+        grid_w = getattr(self, 'grid_w_m', 5.0) * self.scale_factor
+        grid_h = getattr(self, 'grid_h_m', 3.0) * self.scale_factor
+        module = 2 * grid_w  # two columns wide
+        apex_y = y0 - grid_h  # point upwards by one grid height (toward north)
+        pen = QPen(QColor("#555"), 2)
+
+        # Full triangles
+        length = x2 - x1
+        if length <= 0:
+            return
+        n_full = int(length // module)
+        x = x1
+        for i in range(n_full):
+            bx0 = x
+            bx1 = x + module
+            ax = x + module * 0.5
+            # Full triangle polygon (base-left, apex, base-right)
+            poly = QPolygonF([QPointF(bx0, y0), QPointF(ax, apex_y), QPointF(bx1, y0)])
+            item = QGraphicsPolygonItem(poly)
+            item.setPen(pen)
+            item.setBrush(Qt.NoBrush)
+            item.setFlag(QGraphicsItem.ItemIsSelectable, True)
+            # custom state
+            item._is_open = False
+            item._selected_for_window = False
+            item._base_pen = pen
+            self.scene.addItem(item)
+            self.tri_items.append(item)
+            x += module
+
+        # Half triangle if remainder >= one box (5m)
+        rem = length - n_full * module
+        if rem >= grid_w - 1e-6:
+            bx0 = x
+            bx1 = min(x2, x + grid_w)
+            top_y = y0 - grid_h
+            # Draw a right-triangle diagonal spanning exactly one grid box width and full height.
+            # From base-left (bx0, y0) to top-right (bx1, y0 - grid_h).
+            # Half-box diagonal represented as a triangular polygon (base-left, top-right, base-right)
+            # We'll represent it as a thin triangle to keep toggling consistent.
+            poly = QPolygonF([QPointF(bx0, y0), QPointF(bx1, top_y), QPointF(bx1, y0)])
+            item = QGraphicsPolygonItem(poly)
+            item.setPen(pen)
+            item.setBrush(Qt.NoBrush)
+            item.setFlag(QGraphicsItem.ItemIsSelectable, True)
+            item._is_open = False
+            item._selected_for_window = False
+            item._base_pen = pen
+            self.scene.addItem(item)
+            self.tri_items.append(item)
+
     
     def clear_guides(self):
         """
@@ -920,6 +1138,8 @@ class DrawingView(QGraphicsView):
         self.save_state()
         self._refresh_perimeter()
         self._refresh_guides()
+        self._clear_triagonals()
+        # No need to clear overlay; it's repainted each frame
         self.snap_marker.hide()
         self.preview_line.hide()
         self.preview_label.hide()
@@ -954,7 +1174,12 @@ class DrawingView(QGraphicsView):
             return
         # Compute detailed coverage using services
         pts = [(p.x(), p.y()) for p in self.points]
-        coverage = geom_compute_grid_coverage(pts, grid_w_m=5.0, grid_h_m=3.0, scale_factor=self.scale_factor)
+        coverage = geom_compute_grid_coverage(
+            pts,
+            grid_w_m=getattr(self, 'grid_w_m', 5.0),
+            grid_h_m=getattr(self, 'grid_h_m', 3.0),
+            scale_factor=self.scale_factor,
+        )
         if coverage is None:
             QMessageBox.information(self, "Grid Coverage", "Could not compute grid coverage.")
             return
@@ -970,7 +1195,7 @@ class DrawingView(QGraphicsView):
             f"Full boxes: {full_count} (area {full_area_m2:.3f} m²)\n"
             f"Partial boxes: {partial_count} (area {partial_area_m2:.3f} m²)\n\n"
             f"Sum full+partial area: {(full_area_m2 + partial_area_m2):.3f} m²\n"
-            f"Grid size: 5m x 3m"
+            f"Grid size: {getattr(self, 'grid_w_m', 5.0):g}m x {getattr(self, 'grid_h_m', 3.0):g}m"
         )
         QMessageBox.information(self, "Grid Coverage", msg)
 

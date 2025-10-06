@@ -1,5 +1,5 @@
 from PySide6.QtGui import QPalette, QColor
-from PySide6.QtWidgets import QMainWindow, QMessageBox, QToolBar
+from PySide6.QtWidgets import QMainWindow, QMessageBox, QToolBar, QComboBox
 from services.models import Estimator, MaterialItem
 from ui.drawing_view import DrawingView
 from PySide6.QtGui import QAction, QActionGroup
@@ -96,6 +96,62 @@ class MainWindow(QMainWindow):
         column_height_action.triggered.connect(self._set_column_heights)
         toolbar.addAction(column_height_action)
 
+        # Greenhouse type / grid selector
+        self.grid_selector = QComboBox(self)
+        self.grid_selector.setObjectName("GreenhouseTypeSelector")
+        # Presets: label -> (grid_w_m, grid_h_m)
+        self._grid_presets = {
+            "3x5 with sides (5x3 m)": (5.0, 3.0),
+            "5x4 (5x4 m)": (5.0, 4.0),
+            "4x4 (4x4 m)": (4.0, 4.0),
+            "Custom…": None,
+        }
+        for label in self._grid_presets.keys():
+            self.grid_selector.addItem(label)
+        # Set default to 5x3
+        self.grid_selector.setCurrentIndex(0)
+        self.grid_selector.currentTextChanged.connect(self._on_grid_selector_changed)
+        toolbar.addWidget(self.grid_selector)
+
+    def _on_grid_selector_changed(self, text: str):
+        preset = self._grid_presets.get(text)
+        if preset is None:
+            # Custom dimensions
+            try:
+                w, ok_w = ColumnHeightDialog.getDouble(self, "Custom Grid Width", "Width of one grid box (m):", value=self.view.grid_w_m, min=0.1, max=100.0, decimals=2)
+            except Exception:
+                # Fallback to QInputDialog if ColumnHeightDialog doesn't provide getDouble
+                from PySide6.QtWidgets import QInputDialog
+                w, ok_w = QInputDialog.getDouble(self, "Custom Grid Width", "Width of one grid box (m):", value=self.view.grid_w_m, min=0.1, max=100.0, decimals=2)
+            if not ok_w:
+                # Revert selection to previous (5x3)
+                self.grid_selector.blockSignals(True)
+                self.grid_selector.setCurrentIndex(0)
+                self.grid_selector.blockSignals(False)
+                return
+            try:
+                h, ok_h = ColumnHeightDialog.getDouble(self, "Custom Grid Height", "Height of one grid box (m):", value=self.view.grid_h_m, min=0.1, max=100.0, decimals=2)
+            except Exception:
+                from PySide6.QtWidgets import QInputDialog
+                h, ok_h = QInputDialog.getDouble(self, "Custom Grid Height", "Height of one grid box (m):", value=self.view.grid_h_m, min=0.1, max=100.0, decimals=2)
+            if not ok_h:
+                self.grid_selector.blockSignals(True)
+                self.grid_selector.setCurrentIndex(0)
+                self.grid_selector.blockSignals(False)
+                return
+            self.view.grid_w_m = float(w)
+            self.view.grid_h_m = float(h)
+        else:
+            gw, gh = preset
+            self.view.grid_w_m = float(gw)
+            self.view.grid_h_m = float(gh)
+        # Update view state and refresh drawing
+        self.view.greenhouse_type = "3x5_with_sides"  # keep current logic; pattern depends only on grid size for now
+        try:
+            self.view.viewport().update()
+        except Exception:
+            pass
+
     def _ensure_estimator(self):
         """Create an Estimator once, if available. Returns the instance or None."""
         if getattr(self, "estimator", None) is not None:
@@ -128,7 +184,12 @@ class MainWindow(QMainWindow):
 
         # Compute grid coverage summary (full + partial areas)
         try:
-            coverage = geom_compute_grid_coverage(xy, grid_w_m=5.0, grid_h_m=3.0, scale_factor=self.view.scale_factor)
+            coverage = geom_compute_grid_coverage(
+                xy,
+                grid_w_m=getattr(self.view, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self.view, 'grid_h_m', 3.0),
+                scale_factor=self.view.scale_factor,
+            )
         except Exception:
             coverage = None
 
@@ -146,7 +207,7 @@ class MainWindow(QMainWindow):
                 f"Full boxes: {full_count} (area {full_area:.3f} m²)\n"
                 f"Partial boxes: {partial_count} (area {partial_area:.3f} m²)\n"
                 f"Sum full+partial area: {(full_area + partial_area):.3f} m²\n"
-                f"Grid size: 5m x 3m\n"
+                f"Grid size: {getattr(self.view, 'grid_w_m', 5.0):g}m x {getattr(self.view, 'grid_h_m', 3.0):g}m\n"
             )
             if partials:
                 msg += "\nPartial Box Details:\n"
@@ -158,7 +219,7 @@ class MainWindow(QMainWindow):
                 f"Perimeter: {perimeter_m:.2f} m\n"
                 f"Area: {area_m2:.2f} m²\n"
                 f"Partial (cut) grid boxes: {len(partial_details)}\n"
-                f"Grid size: 5m x 3m\n"
+                f"Grid size: {getattr(self.view, 'grid_w_m', 5.0):g}m x {getattr(self.view, 'grid_h_m', 3.0):g}m\n"
             )
             if partial_details:
                 msg += "\nPartial Box Details:\n"
