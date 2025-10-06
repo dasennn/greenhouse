@@ -4,6 +4,7 @@ from services.models import Estimator, MaterialItem
 from ui.drawing_view import DrawingView
 from PySide6.QtGui import QAction, QActionGroup
 from ui.column_height_dialog import ColumnHeightDialog
+from services.geometry_utils import compute_grid_coverage as geom_compute_grid_coverage
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -127,7 +128,7 @@ class MainWindow(QMainWindow):
 
         # Compute grid coverage summary (full + partial areas)
         try:
-            coverage = self.view.compute_grid_coverage(points=xy, grid_w_m=5.0, grid_h_m=3.0)
+            coverage = geom_compute_grid_coverage(xy, grid_w_m=5.0, grid_h_m=3.0, scale_factor=self.view.scale_factor)
         except Exception:
             coverage = None
 

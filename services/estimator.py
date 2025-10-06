@@ -1,5 +1,7 @@
-from PySide6.QtGui import QPalette, QColor
-from PySide6.QtWidgets import QMessageBox
-from services.models import Estimator, MaterialItem
+"""Estimator service module stub.
 
-# Removed MainWindow class as it has been moved to main_window.py
+Historically contained UI-related logic by mistake. This module is reserved
+for non-UI estimation services. If you don't need it, it can be deleted.
+"""
+
+# No runtime logic here; see services/models.py for example classes.
