@@ -19,6 +19,7 @@ from services.geometry_utils import (
     compute_grid_coverage as geom_compute_grid_coverage,
     find_north_south_segments,
     estimate_triangle_posts_3x5_with_sides,
+    estimate_gutters_length,
 )
 
 EPS = 1e-7
@@ -216,6 +217,28 @@ class DrawingView(QGraphicsView):
                     f"Full triangles/row: {est['full_triangles_per_row']}, Half/row: {int(est['has_half_triangle_per_row'])}",
                     f"Low posts/row: {est['low_posts_per_row']}, Tall posts/row: {est['tall_posts_per_row']}",
                     f"Total low posts: {est['total_low_posts']}, Total tall posts: {est['total_tall_posts']}",
+                ]
+        except Exception:
+            pass
+
+        # Append gutters estimation into the same popup
+        try:
+            gut = estimate_gutters_length(
+                pts,
+                grid_w_m=getattr(self, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self, 'grid_h_m', 3.0),
+                scale_factor=self.scale_factor,
+            )
+            if gut:
+                lines += [
+                    "",
+                    "Gutters estimation:",
+                    f"Width: {gut['north_width_m']:.2f} m, Depth: {gut['depth_m']:.2f} m",
+                    f"Module width: {gut['module_w_m']:.2f} m (2×grid_w)",
+                    f"Vertical lines along Y: {gut['lines_x']} (includes edges)",
+                    f"Piece length: {gut['piece_len_m']:.2f} m",
+                    f"Pieces per line: {gut['pieces_per_line']}",
+                    f"Total gutter pieces: {gut['total_pieces']}",
                 ]
         except Exception:
             pass
