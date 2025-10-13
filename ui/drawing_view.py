@@ -129,6 +129,9 @@ class DrawingView(QGraphicsView):
         # Greenhouse grid dimensions in meters (configurable at runtime)
         self.grid_w_m = 5.0  # width of one box (columns)
         self.grid_h_m = 3.0  # height of one box (rows)
+        # Cached overlay data shown in foreground panel
+        self._overlay_data = None  # dict with keys: perimeter_m, area_m2, coverage, posts, gutters
+        self.show_overlay = False
     def _fmt_measure(self, val, unit='m', decimals=2):
         """Format a measurement: no decimals if effectively an integer, otherwise format with given decimals."""
         try:
@@ -155,7 +158,7 @@ class DrawingView(QGraphicsView):
 
     def close_perimeter(self):
         if len(self.points) < 3:
-            QMessageBox.information(self, "Close Perimeter", "Need at least 3 points to close a perimeter.")
+            QMessageBox.information(self, "Κλείσιμο Περιμέτρου", "Χρειάζονται τουλάχιστον 3 σημεία για να κλείσει η περίμετρος.")
             return
         if self.points[0] != self.points[-1]:
             self.save_state()
@@ -243,10 +246,19 @@ class DrawingView(QGraphicsView):
         except Exception:
             pass
 
-        msg = "\n".join(lines)
-        if len(msg) > 15000:
-            msg = msg[:15000] + "\n...output truncated..."
-        QMessageBox.information(self, "Perimeter area & crossing diagnostics", msg)
+        # Prepare overlay cache with the latest diagnostics; remove popup
+        self._overlay_data = {
+            "perimeter_m": perimeter_m,
+            "area_m2": area_m2,
+            "coverage": coverage,
+            "posts": est if 'est' in locals() else None,
+            "gutters": gut if 'gut' in locals() else None,
+        }
+        # Trigger repaint to show overlay
+        try:
+            self.viewport().update()
+        except Exception:
+            pass
 
         # Draw greenhouse type-specific features (default: 3x5 with sides)
         try:
@@ -406,7 +418,7 @@ class DrawingView(QGraphicsView):
 
     def change_grid(self):
         m, ok = QInputDialog.getDouble(
-            self, "Grid Spacing", "Enter grid spacing (meters):",
+            self, "Απόσταση Πλέγματος", "Εισάγετε απόσταση πλέγματος (μέτρα):",
             self.grid_meters, 0.01, 100.0, 2
         )
         if ok:
@@ -433,7 +445,7 @@ class DrawingView(QGraphicsView):
     
     def toggle_polyline_mode(self, on: bool):
         if on and getattr(self, "perimeter_locked", False):
-            QMessageBox.information(self, "Perimeter is closed", "Drawing is locked. Use Clear All to start over.")
+            QMessageBox.information(self, "Περίμετρος κλειστή", "Το σχέδιο είναι κλειδωμένο. Χρησιμοποιήστε 'Καθαρισμός' για να ξεκινήσετε από την αρχή.")
             on = False
         self.polyline_enabled = on
 
@@ -448,7 +460,7 @@ class DrawingView(QGraphicsView):
     
     def toggle_guide_mode(self, on: bool):
         if on and getattr(self, "perimeter_locked", False):
-            QMessageBox.information(self, "Perimeter is closed", "Drawing is locked. Use Clear All to start over.")
+            QMessageBox.information(self, "Περίμετρος κλειστή", "Το σχέδιο είναι κλειδωμένο. Χρησιμοποιήστε 'Καθαρισμός' για να ξεκινήσετε από την αρχή.")
             on = False
         self.guide_enabled = on
 
@@ -738,7 +750,7 @@ class DrawingView(QGraphicsView):
             self.toggle_pointer_mode(True)
             parent = self.parent()
             if isinstance(parent, QMainWindow):
-                ptr_act = parent.findChild(QAction, "Pointer")
+                ptr_act = parent.findChild(QAction, "Δείκτης") or parent.findChild(QAction, "Pointer")
                 if ptr_act:
                     ptr_act.setChecked(True)
             return
@@ -794,7 +806,7 @@ class DrawingView(QGraphicsView):
                 if not self._dim_input:
                     # Prompt user for length (meters)
                     val, ok = QInputDialog.getDouble(
-                        self, "Segment Length", "Enter segment length (meters):", 1.0, 0.01, 1000.0, 2
+                        self, "Μήκος Τμήματος", "Εισάγετε μήκος τμήματος (μέτρα):", 1.0, 0.01, 1000.0, 2
                     )
                     if not ok:
                         # Cancelled dialog
@@ -855,7 +867,7 @@ class DrawingView(QGraphicsView):
                 # If buffer is empty, prompt for length (meters)
                 if not self._dim_input:
                     val, ok = QInputDialog.getDouble(
-                        self, "Guide Length", "Enter guide length (meters):", 1.0, 0.01, 1000.0, 2
+                        self, "Μήκος Οδηγού", "Εισάγετε μήκος οδηγού (μέτρα):", 1.0, 0.01, 1000.0, 2
                     )
                     if not ok:
                         self._dim_input = ""
@@ -962,7 +974,7 @@ class DrawingView(QGraphicsView):
         # No-op for north arrow here; it's drawn as an overlay in drawForeground
 
     def drawForeground(self, painter: QPainter, rect: QRectF):
-        # Paint a simple North arrow overlay (like a map) at the view's top-right corner
+        # Paint overlays: (1) North arrow at top-right, (2) diagnostics panel at top-left
         painter.save()
         try:
             # Reset transforms to device (viewport) coordinates
@@ -994,10 +1006,118 @@ class DrawingView(QGraphicsView):
             font.setBold(True)
             painter.setFont(font)
             painter.drawText(int(x + head + 8), int(y + 6), "N")
+
+            # Diagnostics panel at top-left (disabled unless self.show_overlay)
+            if getattr(self, 'show_overlay', False) and self._overlay_data and getattr(self, 'perimeter_locked', False):
+                # Build lines
+                lines = []
+                perim = self._overlay_data.get("perimeter_m")
+                area = self._overlay_data.get("area_m2")
+                cov = self._overlay_data.get("coverage") or {}
+                posts = self._overlay_data.get("posts") or {}
+                gut = self._overlay_data.get("gutters") or {}
+
+                lines.append(f"Perimeter: {self._fmt_measure(perim)}")
+                lines.append(f"Polygon area: {self._fmt_area(area)}")
+                if cov:
+                    full_c = cov.get('full_count', 0)
+                    full_a = cov.get('full_area_m2', 0.0)
+                    parts = cov.get('partial_details', []) or []
+                    part_a = sum((p.get('area_m2', 0.0) for p in parts))
+                    lines.append(f"Full boxes: {full_c} (area {self._fmt_area(full_a)})")
+                    lines.append(f"Partial boxes: {len(parts)} (area {self._fmt_area(part_a)})")
+                    lines.append(f"Full+Partial area: {self._fmt_area(full_a + part_a)}")
+                    lines.append(f"Grid: {getattr(self, 'grid_w_m', 5.0):g} m × {getattr(self, 'grid_h_m', 3.0):g} m")
+                if posts:
+                    lines.append("")
+                    lines.append("Posts (3x5 with sides):")
+                    lines.append(f"North width: {self._fmt_measure(posts.get('north_width_m', 0.0))}")
+                    lines.append(f"Depth: {self._fmt_measure(posts.get('depth_m', 0.0))}")
+                    lines.append(f"Rows: {posts.get('rows', 0)} | full/row: {posts.get('full_triangles_per_row', 0)} | half/row: {int(posts.get('has_half_triangle_per_row', 0))}")
+                    lines.append(f"Low posts total: {posts.get('total_low_posts', 0)} | Tall posts total: {posts.get('total_tall_posts', 0)}")
+                if gut:
+                    lines.append("")
+                    lines.append("Gutters:")
+                    lines.append(f"Width: {self._fmt_measure(gut.get('north_width_m', 0.0))} | Depth: {self._fmt_measure(gut.get('depth_m', 0.0))}")
+                    lines.append(f"Module: {self._fmt_measure(gut.get('module_w_m', 0.0))} (2×grid_w)")
+                    lines.append(f"Vertical lines: {gut.get('lines_x', 0)} | Piece: {self._fmt_measure(gut.get('piece_len_m', 0.0))}")
+                    lines.append(f"Pieces/line: {gut.get('pieces_per_line', 0)} | Total: {gut.get('total_pieces', 0)}")
+
+                panel_text = "\n".join(lines)
+
+                # Draw semi-transparent panel background sized to text
+                font = QFont()
+                font.setPointSize(9)
+                painter.setFont(font)
+                metrics = painter.fontMetrics()
+                width = max((metrics.horizontalAdvance(line) for line in lines), default=0) + 16
+                height = metrics.height() * len(lines) + 16
+                # Panel rect
+                px = 12
+                py = 12
+                painter.setBrush(QBrush(QColor(255, 255, 255, 220)))
+                painter.setPen(QPen(QColor(180, 180, 180)))
+                painter.drawRoundedRect(px, py, width, height, 6, 6)
+                # Text
+                painter.setPen(QPen(QColor(40, 40, 40)))
+                y_cursor = py + 8 + metrics.ascent()
+                for line in lines:
+                    painter.drawText(px + 8, int(y_cursor), line)
+                    y_cursor += metrics.height()
         finally:
             painter.restore()
         # Call base to ensure default behavior
         return super().drawForeground(painter, rect)
+
+    def recompute_overlay_if_possible(self):
+        """Recompute overlay diagnostics if a closed perimeter exists and is locked."""
+        if not getattr(self, 'perimeter_locked', False) or len(self.points) < 3:
+            return
+        # compute perimeter and area
+        perimeter_m = 0.0
+        for i in range(1, len(self.points)):
+            p0, p1 = self.points[i - 1], self.points[i]
+            perimeter_m += math.hypot(p1.x() - p0.x(), p1.y() - p0.y()) / self.scale_factor
+        area_m2 = self._polygon_area_m2(self.points)
+        pts = [(p.x(), p.y()) for p in self.points]
+        try:
+            coverage = geom_compute_grid_coverage(
+                pts,
+                grid_w_m=getattr(self, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self, 'grid_h_m', 3.0),
+                scale_factor=self.scale_factor,
+            )
+        except Exception:
+            coverage = None
+        try:
+            posts = estimate_triangle_posts_3x5_with_sides(
+                pts,
+                grid_w_m=getattr(self, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self, 'grid_h_m', 3.0),
+                scale_factor=self.scale_factor,
+            )
+        except Exception:
+            posts = None
+        try:
+            gut = estimate_gutters_length(
+                pts,
+                grid_w_m=getattr(self, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self, 'grid_h_m', 3.0),
+                scale_factor=self.scale_factor,
+            )
+        except Exception:
+            gut = None
+        self._overlay_data = {
+            "perimeter_m": perimeter_m,
+            "area_m2": area_m2,
+            "coverage": coverage,
+            "posts": posts,
+            "gutters": gut,
+        }
+        try:
+            self.viewport().update()
+        except Exception:
+            pass
 
     def _refresh_guides(self):
         # Remove ALL old lines and labels
@@ -1163,6 +1283,7 @@ class DrawingView(QGraphicsView):
         self._refresh_guides()
         self._clear_triagonals()
         # No need to clear overlay; it's repainted each frame
+        self._overlay_data = None
         self.snap_marker.hide()
         self.preview_line.hide()
         self.preview_label.hide()

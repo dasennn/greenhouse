@@ -1,10 +1,26 @@
 from PySide6.QtGui import QPalette, QColor
-from PySide6.QtWidgets import QMainWindow, QMessageBox, QToolBar, QComboBox
-from services.models import Estimator, MaterialItem
+from PySide6.QtWidgets import (
+    QMainWindow,
+    QMessageBox,
+    QToolBar,
+    QComboBox,
+    QDockWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QLabel,
+    QWidget,
+    QVBoxLayout,
+)
+from PySide6.QtCore import Qt
+from services.models import Estimator, MaterialItem, BillOfMaterials
 from ui.drawing_view import DrawingView
 from PySide6.QtGui import QAction, QActionGroup
 from ui.column_height_dialog import ColumnHeightDialog
-from services.geometry_utils import compute_grid_coverage as geom_compute_grid_coverage
+from services.geometry_utils import (
+    compute_grid_coverage as geom_compute_grid_coverage,
+    estimate_triangle_posts_3x5_with_sides,
+    estimate_gutters_length,
+)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -37,51 +53,53 @@ class MainWindow(QMainWindow):
         self.estimator = None  # lazy-created when needed
         self.large_column_height = None
         self.small_column_height = None
+        # Create toolbar first, then docks so toggles can be added
         self._create_toolbar()
+        # Create BOM dock then info dock, then stack them on the right
+        self._create_bom_dock()
+        self._create_info_dock()
         self.view.perimeter_closed.connect(self._on_perimeter_closed)
+        self._last_xy = None  # cache last perimeter points for optional recompute
 
     def _create_toolbar(self):
-        toolbar = QToolBar("Tools", self)
-        self.addToolBar(toolbar)
+        self.toolbar = QToolBar("Εργαλεία", self)
+        self.addToolBar(self.toolbar)
 
-        # OSnap toggle
+        # OSnap
         osnap_act = QAction("OSnap", self)
         osnap_act.setCheckable(True)
         osnap_act.setChecked(True)
         osnap_act.toggled.connect(self.view.toggle_osnap_mode)
-        toolbar.addAction(osnap_act)
-        toolbar.addSeparator()
+        self.toolbar.addAction(osnap_act)
+        self.toolbar.addSeparator()
 
-        # Exclusive modes
+        # Κατάσταση λειτουργίας (αμοιβαία αποκλειόμενες)
         mode_group = QActionGroup(self)
         mode_group.setExclusive(True)
         modes = [
-            ("Pointer",     self.view.toggle_pointer_mode),
-            ("Polyline",    self.view.toggle_polyline_mode),
-            ("Guide Lines", self.view.toggle_guide_mode),
-            ("Hand Pan",    self.view.toggle_pan_mode),
+            ("Δείκτης",      self.view.toggle_pointer_mode),
+            ("Πολυγραμμή",   self.view.toggle_polyline_mode),
+            ("Οδηγοί",       self.view.toggle_guide_mode),
+            ("Μετακίνηση",   self.view.toggle_pan_mode),
         ]
         for label, handler in modes:
             act = QAction(label, self)
             act.setObjectName(label)
             act.setCheckable(True)
             act.toggled.connect(handler)
-            toolbar.addAction(act)
+            self.toolbar.addAction(act)
             mode_group.addAction(act)
         mode_group.actions()[0].setChecked(True)
-        toolbar.addSeparator()
+        self.toolbar.addSeparator()
 
-        # Other tools
+        # Άλλα εργαλεία
         tools = [
-            ("Undo",            self.view.undo,            "Ctrl+Z"),
-            ("Redo",            self.view.redo,            "Ctrl+Y"),
-            ("Delete",          self.view.delete_selected, "Del"),
-            ("Clear All",       self.view.clear_all,       None),
-            ("Grid Spacing",    self.view.change_grid,     None),
-            ("Grid+",           self.view.increase_grid,   "="),
-            ("Grid-",           self.view.decrease_grid,   "-"),
-            ("Close Perimeter", self._close_perimeter,     None),
-            ("Erase Guides", self.view.clear_guides, None),
+            ("Αναίρεση",            self.view.undo,            "Ctrl+Z"),
+            ("Επανάληψη",           self.view.redo,            "Ctrl+Y"),
+            ("Διαγραφή",            self.view.delete_selected, "Del"),
+            ("Διαγραφή όλων",       self._clear_all_and_reset, None),
+            ("Κλείσιμο Περιμέτρου", self._close_perimeter,     None),
+            ("Διαγραφή Οδηγών",     self.view.clear_guides,    None),
         ]
         for label, handler, shortcut in tools:
             act = QAction(label, self)
@@ -89,40 +107,98 @@ class MainWindow(QMainWindow):
             if shortcut:
                 act.setShortcut(shortcut)
             act.triggered.connect(handler)
-            toolbar.addAction(act)
+            self.toolbar.addAction(act)
 
-        # Add a toolbar action to open the column height dialog
-        column_height_action = QAction("Set Column Heights", self)
+        # Ύψη κολόνων (διάλογος)
+        column_height_action = QAction("Ύψη Κολόνων", self)
         column_height_action.triggered.connect(self._set_column_heights)
-        toolbar.addAction(column_height_action)
+        self.toolbar.addAction(column_height_action)
 
-        # Greenhouse type / grid selector
+        # Επιλογή τύπου/πλέγματος θερμοκηπίου
         self.grid_selector = QComboBox(self)
         self.grid_selector.setObjectName("GreenhouseTypeSelector")
         # Presets: label -> (grid_w_m, grid_h_m)
         self._grid_presets = {
-            "3x5 with sides (5x3 m)": (5.0, 3.0),
+            "3x5 με πλευρές (5x3 m)": (5.0, 3.0),
             "5x4 (5x4 m)": (5.0, 4.0),
             "4x4 (4x4 m)": (4.0, 4.0),
-            "Custom…": None,
+            "Προσαρμοσμένο…": None,
         }
         for label in self._grid_presets.keys():
             self.grid_selector.addItem(label)
         # Set default to 5x3
         self.grid_selector.setCurrentIndex(0)
         self.grid_selector.currentTextChanged.connect(self._on_grid_selector_changed)
-        toolbar.addWidget(self.grid_selector)
+        self.toolbar.addWidget(self.grid_selector)
+
+    def _create_info_dock(self):
+        self.info_dock = QDockWidget("Στοιχεία Σχεδίου", self)
+        self.info_dock.setObjectName("DrawingInfoDock")
+        container = QWidget(self.info_dock)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(6, 6, 6, 6)
+
+        self.info_tree = QTreeWidget(container)
+        self.info_tree.setColumnCount(2)
+        self.info_tree.setHeaderLabels(["Πεδίο", "Τιμή"])
+        self.info_tree.setRootIsDecorated(False)
+        layout.addWidget(self.info_tree)
+
+        container.setLayout(layout)
+        self.info_dock.setWidget(container)
+        # Add initially to right area and stack with BOM dock
+        self.addDockWidget(Qt.RightDockWidgetArea, self.info_dock)
+        try:
+            # Stack info_dock above the BOM dock (vertical split)
+            self.splitDockWidget(self.bom_dock, self.info_dock, Qt.Vertical)
+        except Exception:
+            # Fallback: leave both docks in the right area
+            pass
+        # Toolbar toggle for info dock
+        try:
+            info_toggle = self.info_dock.toggleViewAction()
+            info_toggle.setText("Πάνελ Στοιχείων Σχεδίου")
+            self.toolbar.addAction(info_toggle)
+        except Exception:
+            pass
+
+    def _create_bom_dock(self):
+        self.bom_dock = QDockWidget("Υλικά & Κόστος", self)
+        self.bom_dock.setObjectName("MaterialsCostDock")
+        container = QWidget(self.bom_dock)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(6, 6, 6, 6)
+
+        self.bom_tree = QTreeWidget(container)
+        self.bom_tree.setColumnCount(5)
+        self.bom_tree.setHeaderLabels(["Είδος", "Μονάδα", "Ποσότητα", "Τιμή Μονάδας", "Σύνολο"])
+        self.bom_tree.setRootIsDecorated(False)
+        layout.addWidget(self.bom_tree)
+
+        self.bom_total_label = QLabel("Υποσύνολο: 0.00 EUR", container)
+        layout.addWidget(self.bom_total_label)
+
+        container.setLayout(layout)
+        self.bom_dock.setWidget(container)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.bom_dock)
+        # Add a toolbar toggle to show/hide this dock
+        try:
+            toggle_action = self.bom_dock.toggleViewAction()
+            toggle_action.setText("Πάνελ Υλικών & Κόστους")
+            self.toolbar.addAction(toggle_action)
+        except Exception:
+            pass
 
     def _on_grid_selector_changed(self, text: str):
         preset = self._grid_presets.get(text)
         if preset is None:
             # Custom dimensions
             try:
-                w, ok_w = ColumnHeightDialog.getDouble(self, "Custom Grid Width", "Width of one grid box (m):", value=self.view.grid_w_m, min=0.1, max=100.0, decimals=2)
+                w, ok_w = ColumnHeightDialog.getDouble(self, "Πλάτος Κελιού Πλέγματος", "Πλάτος κελιού (m):", value=self.view.grid_w_m, min=0.1, max=100.0, decimals=2)
             except Exception:
                 # Fallback to QInputDialog if ColumnHeightDialog doesn't provide getDouble
                 from PySide6.QtWidgets import QInputDialog
-                w, ok_w = QInputDialog.getDouble(self, "Custom Grid Width", "Width of one grid box (m):", value=self.view.grid_w_m, min=0.1, max=100.0, decimals=2)
+                w, ok_w = QInputDialog.getDouble(self, "Πλάτος Κελιού Πλέγματος", "Πλάτος κελιού (m):", value=self.view.grid_w_m, min=0.1, max=100.0, decimals=2)
             if not ok_w:
                 # Revert selection to previous (5x3)
                 self.grid_selector.blockSignals(True)
@@ -130,10 +206,10 @@ class MainWindow(QMainWindow):
                 self.grid_selector.blockSignals(False)
                 return
             try:
-                h, ok_h = ColumnHeightDialog.getDouble(self, "Custom Grid Height", "Height of one grid box (m):", value=self.view.grid_h_m, min=0.1, max=100.0, decimals=2)
+                h, ok_h = ColumnHeightDialog.getDouble(self, "Ύψος Κελιού Πλέγματος", "Ύψος κελιού (m):", value=self.view.grid_h_m, min=0.1, max=100.0, decimals=2)
             except Exception:
                 from PySide6.QtWidgets import QInputDialog
-                h, ok_h = QInputDialog.getDouble(self, "Custom Grid Height", "Height of one grid box (m):", value=self.view.grid_h_m, min=0.1, max=100.0, decimals=2)
+                h, ok_h = QInputDialog.getDouble(self, "Ύψος Κελιού Πλέγματος", "Ύψος κελιού (m):", value=self.view.grid_h_m, min=0.1, max=100.0, decimals=2)
             if not ok_h:
                 self.grid_selector.blockSignals(True)
                 self.grid_selector.setCurrentIndex(0)
@@ -151,6 +227,9 @@ class MainWindow(QMainWindow):
             self.view.viewport().update()
         except Exception:
             pass
+        # Optionally recompute BOM and info if a perimeter exists (using cached xy)
+        self._recompute_bom_if_possible()
+        self._recompute_info_if_possible()
 
     def _ensure_estimator(self):
         """Create an Estimator once, if available. Returns the instance or None."""
@@ -181,6 +260,8 @@ class MainWindow(QMainWindow):
             xy.append((x, y))
         if len(xy) >= 2 and xy[0] == xy[-1]:
             xy = xy[:-1]
+        # Cache for possible recompute on grid change
+        self._last_xy = xy
 
         # Compute grid coverage summary (full + partial areas)
         try:
@@ -200,48 +281,193 @@ class MainWindow(QMainWindow):
             partials = coverage['partial_details']
             partial_count = len(partials)
             partial_area = sum(p['area_m2'] for p in partials)
-
-            msg = (
-                f"Perimeter: {perimeter_m:.2f} m\n"
-                f"Polygon area: {poly_area:.3f} m²\n"
-                f"Full boxes: {full_count} (area {full_area:.3f} m²)\n"
-                f"Partial boxes: {partial_count} (area {partial_area:.3f} m²)\n"
-                f"Sum full+partial area: {(full_area + partial_area):.3f} m²\n"
-                f"Grid size: {getattr(self.view, 'grid_w_m', 5.0):g}m x {getattr(self.view, 'grid_h_m', 3.0):g}m\n"
-            )
-            if partials:
-                msg += "\nPartial Box Details:\n"
-                for p in partials:
-                    msg += f"  Grid {p['grid']}: {p['area_m2']:.3f} m², perimeter inside = {p.get('boundary_length_m', 0.0):.3f} m\n"
+            # Update info dock
+            self._update_info_pane({
+                "Περίμετρος": f"{perimeter_m:.2f} m",
+                "Εμβαδόν Πολυγώνου": f"{poly_area:.3f} m²",
+                "Πλήρη Κελιά": f"{full_count} (εμβαδόν {full_area:.3f} m²)",
+                "Μερικά Κελιά": f"{partial_count} (εμβαδόν {partial_area:.3f} m²)",
+                "Σύνολο Πλήρη+Μερικά": f"{(full_area + partial_area):.3f} m²",
+                "Πλέγμα": f"{getattr(self.view, 'grid_w_m', 5.0):g} m × {getattr(self.view, 'grid_h_m', 3.0):g} m",
+            })
         else:
-            # Fallback: show minimal info
-            msg = (
-                f"Perimeter: {perimeter_m:.2f} m\n"
-                f"Area: {area_m2:.2f} m²\n"
-                f"Partial (cut) grid boxes: {len(partial_details)}\n"
-                f"Grid size: {getattr(self.view, 'grid_w_m', 5.0):g}m x {getattr(self.view, 'grid_h_m', 3.0):g}m\n"
+            # Fallback: show minimal info in dock
+            self._update_info_pane({
+                "Περίμετρος": f"{perimeter_m:.2f} m",
+                "Εμβαδόν": f"{area_m2:.2f} m²",
+                "Μερικά Κελιά": f"{len(partial_details)}",
+                "Πλέγμα": f"{getattr(self.view, 'grid_w_m', 5.0):g} m × {getattr(self.view, 'grid_h_m', 3.0):g} m",
+            })
+
+        # Build/update Materials & Cost pane (BOM)
+        try:
+            posts = estimate_triangle_posts_3x5_with_sides(
+                xy,
+                grid_w_m=getattr(self.view, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self.view, 'grid_h_m', 3.0),
+                scale_factor=self.view.scale_factor,
             )
-            if partial_details:
-                msg += "\nPartial Box Details:\n"
-                for pd in partial_details:
-                    grid = pd['grid']
-                    area_px2 = pd['intersection_area']
-                    sf = self.view.scale_factor
-                    area_m2 = area_px2 / (sf * sf) if sf and sf != 0 else 0.0
-                    msg += f"  Grid {grid}: Area inside = {area_m2:.3f} m²\n"
+        except Exception:
+            posts = None
+        try:
+            gutters = estimate_gutters_length(
+                xy,
+                grid_w_m=getattr(self.view, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self.view, 'grid_h_m', 3.0),
+                scale_factor=self.view.scale_factor,
+            )
+        except Exception:
+            gutters = None
+        est = self._ensure_estimator()
+        if est is not None:
+            try:
+                bom = est.compute_bom(posts, gutters, grid_h_m=getattr(self.view, 'grid_h_m', 3.0))
+                self._update_bom_pane(bom)
+            except Exception:
+                pass
 
         # Only show a short summary in the status bar here; the detailed popup is shown
         # by DrawingView when the perimeter is closed. Print full details to console for
         # debugging/history so we don't pop a second modal dialog.
         try:
-            summary = f"Perimeter closed: {perimeter_m:.2f} m, area {poly_area:.3f} m², full+partial {(full_area + partial_area):.3f} m²"
+            summary = f"Κλείστηκε το περίγραμμα: {perimeter_m:.2f} m, εμβαδόν {poly_area:.3f} m², σύνολο {(full_area + partial_area):.3f} m²"
         except Exception:
-            summary = f"Perimeter closed: {perimeter_m:.2f} m, area {area_m2:.3f} m²"
+            summary = f"Κλείστηκε το περίγραμμα: {perimeter_m:.2f} m, εμβαδόν {area_m2:.3f} m²"
         # show brief message in status bar for a short time
         try:
             self.statusBar().showMessage(summary, 8000)
         except Exception:
             # if no status bar, quietly ignore (don't print to console)
+            pass
+
+    def _update_bom_pane(self, bom: BillOfMaterials | None):
+        if bom is None:
+            return
+        try:
+            self.bom_tree.clear()
+            for line in bom.lines:
+                item = QTreeWidgetItem([
+                    line.name,
+                    line.unit,
+                    f"{line.quantity:g}",
+                    f"{line.unit_price:.2f}",
+                    f"{line.total:.2f}",
+                ])
+                self.bom_tree.addTopLevelItem(item)
+            self.bom_total_label.setText(f"Υποσύνολο: {bom.subtotal:.2f} {bom.currency}")
+        except Exception:
+            # Safe no-op if dock isn't ready
+            pass
+
+    def _update_info_pane(self, info: dict | None):
+        if info is None:
+            return
+        try:
+            self.info_tree.clear()
+            for k, v in info.items():
+                item = QTreeWidgetItem([str(k), str(v)])
+                self.info_tree.addTopLevelItem(item)
+        except Exception:
+            pass
+
+    def _recompute_bom_if_possible(self):
+        if not self._last_xy:
+            return
+        xy = self._last_xy
+        try:
+            posts = estimate_triangle_posts_3x5_with_sides(
+                xy,
+                grid_w_m=getattr(self.view, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self.view, 'grid_h_m', 3.0),
+                scale_factor=self.view.scale_factor,
+            )
+        except Exception:
+            posts = None
+        try:
+            gutters = estimate_gutters_length(
+                xy,
+                grid_w_m=getattr(self.view, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self.view, 'grid_h_m', 3.0),
+                scale_factor=self.view.scale_factor,
+            )
+        except Exception:
+            gutters = None
+        est = self._ensure_estimator()
+        if est is not None:
+            try:
+                bom = est.compute_bom(posts, gutters, grid_h_m=getattr(self.view, 'grid_h_m', 3.0))
+                self._update_bom_pane(bom)
+            except Exception:
+                pass
+
+    def _recompute_info_if_possible(self):
+        if not self._last_xy:
+            return
+        xy = self._last_xy
+        try:
+            coverage = geom_compute_grid_coverage(
+                xy,
+                grid_w_m=getattr(self.view, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self.view, 'grid_h_m', 3.0),
+                scale_factor=self.view.scale_factor,
+            )
+        except Exception:
+            coverage = None
+        perimeter_m = 0.0
+        for i in range(1, len(xy)):
+            x0, y0 = xy[i-1]
+            x1, y1 = xy[i]
+            perimeter_m += ((x1 - x0)**2 + (y1 - y0)**2) ** 0.5 / self.view.scale_factor
+        # area (m^2) via shoelace
+        area_m2 = 0.0
+        try:
+            pts = list(xy)
+            if pts and pts[0] != pts[-1]:
+                pts.append(pts[0])
+            s = 0.0
+            for i in range(len(pts)-1):
+                x1, y1 = pts[i]
+                x2, y2 = pts[i+1]
+                s += x1*y2 - x2*y1
+            area_px2 = abs(s) * 0.5
+            area_m2 = area_px2 / (self.view.scale_factor ** 2)
+        except Exception:
+            pass
+
+        if coverage:
+            poly_area = coverage['polygon_area_m2']
+            full_count = coverage['full_count']
+            full_area = coverage['full_area_m2']
+            partials = coverage['partial_details']
+            partial_count = len(partials)
+            partial_area = sum(p['area_m2'] for p in partials)
+            self._update_info_pane({
+                "Περίμετρος": f"{perimeter_m:.2f} m",
+                "Εμβαδόν Πολυγώνου": f"{poly_area:.3f} m²",
+                "Πλήρη Κελιά": f"{full_count} (εμβαδόν {full_area:.3f} m²)",
+                "Μερικά Κελιά": f"{partial_count} (εμβαδόν {partial_area:.3f} m²)",
+                "Σύνολο Πλήρη+Μερικά": f"{(full_area + partial_area):.3f} m²",
+                "Πλέγμα": f"{getattr(self.view, 'grid_w_m', 5.0):g} m × {getattr(self.view, 'grid_h_m', 3.0):g} m",
+            })
+        else:
+            self._update_info_pane({
+                "Περίμετρος": f"{perimeter_m:.2f} m",
+                "Εμβαδόν": f"{area_m2:.2f} m²",
+                "Πλέγμα": f"{getattr(self.view, 'grid_w_m', 5.0):g} m × {getattr(self.view, 'grid_h_m', 3.0):g} m",
+            })
+
+    def _clear_all_and_reset(self):
+        # Clear the drawing and reset panels
+        self.view.clear_all()
+        self._last_xy = None
+        try:
+            self.bom_tree.clear()
+            self.bom_total_label.setText("Υποσύνολο: 0.00 EUR")
+        except Exception:
+            pass
+        try:
+            self.info_tree.clear()
+        except Exception:
             pass
 
     def _set_column_heights(self):
