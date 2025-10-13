@@ -1,0 +1,27 @@
+{
+  "post_tall": {
+    "name": "Κολόνα Ψηλή",
+    "unit": "τεμ.",
+    "unit_price": 8.75
+  },
+  "post_low": {
+    "name": "Κολόνα Χαμηλή",
+    "unit": "τεμ.",
+    "unit_price": 6.5
+  },
+  "gutter_3m": {
+    "name": "Υδρορροή 3m",
+    "unit": "τεμ.",
+    "unit_price": 12.5
+  },
+  "gutter_4m": {
+    "name": "Υδρορροή 4m",
+    "unit": "τεμ.",
+    "unit_price": 14.0
+  },
+  "gutter_piece": {
+    "name": "Υδρορροή",
+    "unit": "τεμ.",
+    "unit_price": 12.5
+  }
+}
