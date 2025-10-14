@@ -258,11 +258,16 @@ class MainWindow(QMainWindow):
             self.estimator = None
             return None
         try:
-            # Φόρτωση τιμών από CSV (αν υπάρχει), αλλιώς JSON (παλαιό), αλλιώς defaults
-            materials = self._load_materials_from_csv_disk()
-            if not materials:
-                materials = self._load_materials_from_disk()
-            self.estimator = Estimator(materials=materials or {}, scale_factor=self.view.scale_factor)
+            # Φόρτωση τιμών από CSV (αν υπάρχει), αλλιώς JSON (παλαιό)
+            # Πάντα εκκίνηση με defaults και συγχώνευση των φορτωμένων, ώστε να μη χαθούν υλικά που δεν υπάρχουν στο αρχείο (π.χ. ridge_cap)
+            loaded_materials = self._load_materials_from_csv_disk()
+            if not loaded_materials:
+                loaded_materials = self._load_materials_from_disk()
+            # Δημιουργία estimator με defaults
+            self.estimator = Estimator(scale_factor=self.view.scale_factor)
+            # Συγχώνευση τιμών χρήστη πάνω από τα defaults
+            if loaded_materials:
+                self.estimator.materials.update(loaded_materials)
         except Exception:
             self.estimator = None
         return self.estimator
@@ -550,7 +555,8 @@ class MainWindow(QMainWindow):
                 return
 
             if materials:
-                est.materials = materials
+                # Συγχώνευση με τα ήδη υπάρχοντα (κρατάμε defaults και ενημερώνουμε/προσθέτουμε όσα υπάρχουν στο CSV)
+                est.materials.update(materials)
                 self._last_loaded_codes = loaded_codes
                 self._last_loaded_errors = error_codes
                 self._recompute_bom_if_possible()
@@ -643,7 +649,8 @@ class MainWindow(QMainWindow):
                 return
 
             if materials:
-                est.materials = materials
+                # Συγχώνευση με τα ήδη υπάρχοντα (κρατάμε defaults και ενημερώνουμε/προσθέτουμε όσα υπάρχουν στο JSON)
+                est.materials.update(materials)
                 # Αποθήκευση status σε ιδιότητες για εμφάνιση στη στήλη "Κατάσταση"
                 self._last_loaded_codes = loaded_codes
                 self._last_loaded_errors = error_codes
