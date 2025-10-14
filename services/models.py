@@ -6,7 +6,7 @@ from typing import List
 class MaterialItem:
     code: str
     name: str
-    unit: str = "piece"  # e.g., piece, m, kg
+    unit: str = "κομμάτι"  # e.g., piece, m, kg
     unit_price: float = 0.0
 
 
