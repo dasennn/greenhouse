@@ -1,4 +1,4 @@
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtGui import QPalette, QColor, QDoubleValidator
 from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
@@ -13,9 +13,13 @@ from PySide6.QtWidgets import (
     QPushButton,
     QHBoxLayout,
     QFileDialog,
+    QStyledItemDelegate,
+    QLineEdit,
+    QToolButton,
+    QMenu,
 )
 from PySide6.QtCore import Qt
-from services.estimator import Estimator
+from services.estimator import Estimator, default_material_catalog
 from services.models import MaterialItem, BillOfMaterials
 from ui.drawing_view import DrawingView
 from PySide6.QtGui import QAction, QActionGroup
@@ -26,8 +30,16 @@ from services.geometry_utils import (
     estimate_gutters_length,
 )
 from pathlib import Path
-import json
 import csv
+
+class PriceOnlyDelegate(QStyledItemDelegate):
+    """Delegate that allows editing only for the Unit Price column (index 3)."""
+    def createEditor(self, parent, option, index):
+        if index.column() == 3:
+            editor = QLineEdit(parent)
+            editor.setValidator(QDoubleValidator(0.0, 1e12, 4, parent))
+            return editor
+        return None
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -63,6 +75,16 @@ class MainWindow(QMainWindow):
         # Κατάσταση τελευταίας φόρτωσης τιμών από αρχείο
         self._last_loaded_codes = set()
         self._last_loaded_errors = set()
+        # Τρέχουσα διαδρομή CSV για αποθήκευση/φόρτωση τιμών
+        self._current_csv_path = None
+        # Flag για να δείξουμε μήνυμα status μόνο την πρώτη φορά
+        self._price_source_announced = False
+        # Flag: αν οι τιμές από το τρέχον CSV είναι *εφαρμοσμένες* (όχι απλώς διαθέσιμες ως path)
+        # Μπορεί να υπάρχει path αλλά μετά από reset να μην είναι εφαρμοσμένο μέχρι reload.
+        self._csv_applied = False
+        # Χρήστη προσαρμοσμένες προεπιλογές (αν υπάρχουν) σε config/userdefaults.csv
+        self._user_defaults_path = self._user_defaults_csv_path()
+        self._user_defaults_active = False
 
         # Create toolbar first, then docks so toggles can be added
         self._create_toolbar()
@@ -142,42 +164,35 @@ class MainWindow(QMainWindow):
         self.grid_selector.currentTextChanged.connect(self._on_grid_selector_changed)
         self.toolbar.addWidget(self.grid_selector)
 
-        # Εισαγωγή τιμών από CSV (νέο)
-        import_csv_action = QAction("Εισαγωγή Τιμών (CSV)", self)
-        import_csv_action.setObjectName("ImportCSVPrices")
-        import_csv_action.triggered.connect(self._import_prices_csv_dialog)
-        self.toolbar.addAction(import_csv_action)
+        # Διαχείριση Τιμών: ενοποιημένο dropdown (Import, Save, Save As, Reload, Reset)
+        self.prices_button = QToolButton(self.toolbar)
+        self.prices_button.setText("Τιμές Υλικών")
+        self.prices_button.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(self.prices_button)
 
-    def _create_info_dock(self):
-        self.info_dock = QDockWidget("Στοιχεία Σχεδίου", self)
-        self.info_dock.setObjectName("DrawingInfoDock")
-        container = QWidget(self.info_dock)
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(6, 6, 6, 6)
+        act_import = QAction("Εισαγωγή (CSV)", self)
+        act_import.triggered.connect(self._import_prices_csv_dialog)
+        menu.addAction(act_import)
 
-        self.info_tree = QTreeWidget(container)
-        self.info_tree.setColumnCount(2)
-        self.info_tree.setHeaderLabels(["Πεδίο", "Τιμή"])
-        self.info_tree.setRootIsDecorated(False)
-        layout.addWidget(self.info_tree)
+        act_save = QAction("Αποθήκευση", self)
+        act_save.triggered.connect(self._save_prices_csv_action)
+        menu.addAction(act_save)
 
-        container.setLayout(layout)
-        self.info_dock.setWidget(container)
-        # Add initially to right area and stack with BOM dock
-        self.addDockWidget(Qt.RightDockWidgetArea, self.info_dock)
-        try:
-            # Stack info_dock above the BOM dock (vertical split)
-            self.splitDockWidget(self.bom_dock, self.info_dock, Qt.Vertical)
-        except Exception:
-            # Fallback: leave both docks in the right area
-            pass
-        # Toolbar toggle for info dock
-        try:
-            info_toggle = self.info_dock.toggleViewAction()
-            info_toggle.setText("Πάνελ Στοιχείων Σχεδίου")
-            self.toolbar.addAction(info_toggle)
-        except Exception:
-            pass
+        act_save_as = QAction("Αποθήκευση Ως…", self)
+        act_save_as.triggered.connect(self._save_prices_csv_as_action)
+        menu.addAction(act_save_as)
+
+        act_reload = QAction("Επαναφόρτωση", self)
+        act_reload.triggered.connect(self._reload_current_csv_prices)
+        menu.addAction(act_reload)
+
+        menu.addSeparator()
+        act_reset = QAction("Επαναφορά Προεπιλογών", self)
+        act_reset.triggered.connect(self._reset_prices_to_defaults)
+        menu.addAction(act_reset)
+
+        self.prices_button.setMenu(menu)
+        self.toolbar.addWidget(self.prices_button)
 
     def _create_bom_dock(self):
         self.bom_dock = QDockWidget("Υλικά & Κόστος", self)
@@ -190,21 +205,49 @@ class MainWindow(QMainWindow):
         self.bom_tree.setColumnCount(6)
         self.bom_tree.setHeaderLabels(["Είδος", "Μονάδα", "Ποσότητα", "Τιμή Μονάδας", "Σύνολο", "Κατάσταση"]) 
         self.bom_tree.setRootIsDecorated(False)
-        # Θα επιτρέψουμε edit στο πεδίο τιμής (στήλη 3)
+        self.bom_tree.setItemDelegate(PriceOnlyDelegate(self.bom_tree))
         self.bom_tree.itemChanged.connect(self._on_bom_item_changed)
         layout.addWidget(self.bom_tree)
 
         self.bom_total_label = QLabel("Υποσύνολο: 0.00 EUR", container)
         layout.addWidget(self.bom_total_label)
 
+        self.price_source_label = QLabel("Αρχείο τιμών: Προεπιλογές", container)
+        self.price_source_label.setObjectName("PriceSourceLabel")
+        layout.addWidget(self.price_source_label)
+
         container.setLayout(layout)
         self.bom_dock.setWidget(container)
         self.addDockWidget(Qt.RightDockWidgetArea, self.bom_dock)
-        # Add a toolbar toggle to show/hide this dock
         try:
             toggle_action = self.bom_dock.toggleViewAction()
             toggle_action.setText("Πάνελ Υλικών & Κόστους")
             self.toolbar.addAction(toggle_action)
+        except Exception:
+            pass
+
+    def _create_info_dock(self):
+        self.info_dock = QDockWidget("Στοιχεία Σχεδίου", self)
+        self.info_dock.setObjectName("DrawingInfoDock")
+        container = QWidget(self.info_dock)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(6, 6, 6, 6)
+        self.info_tree = QTreeWidget(container)
+        self.info_tree.setColumnCount(2)
+        self.info_tree.setHeaderLabels(["Πεδίο", "Τιμή"])
+        self.info_tree.setRootIsDecorated(False)
+        layout.addWidget(self.info_tree)
+        container.setLayout(layout)
+        self.info_dock.setWidget(container)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.info_dock)
+        try:
+            self.splitDockWidget(self.bom_dock, self.info_dock, Qt.Vertical)
+        except Exception:
+            pass
+        try:
+            info_toggle = self.info_dock.toggleViewAction()
+            info_toggle.setText("Πάνελ Στοιχείων Σχεδίου")
+            self.toolbar.addAction(info_toggle)
         except Exception:
             pass
 
@@ -258,18 +301,56 @@ class MainWindow(QMainWindow):
             self.estimator = None
             return None
         try:
-            # Φόρτωση τιμών από CSV (αν υπάρχει), αλλιώς JSON (παλαιό)
-            # Πάντα εκκίνηση με defaults και συγχώνευση των φορτωμένων, ώστε να μη χαθούν υλικά που δεν υπάρχουν στο αρχείο (π.χ. ridge_cap)
+            # Φόρτωση τιμών από CSV (αν υπάρχει)
+        # Πάντα εκκίνηση με defaults και συγχώνευση των φορτωμένων, ώστε να μη χαθούν υλικά που δεν υπάρχουν στο αρχείο
             loaded_materials = self._load_materials_from_csv_disk()
-            if not loaded_materials:
-                loaded_materials = self._load_materials_from_disk()
             # Δημιουργία estimator με defaults
             self.estimator = Estimator(scale_factor=self.view.scale_factor)
+            # Εφαρμογή user defaults εάν υπάρχει αρχείο userdefaults.csv
+            try:
+                user_defs = self._load_user_defaults()
+                if user_defs:
+                    self.estimator.materials.update(user_defs)
+                    self._user_defaults_active = True
+            except Exception:
+                pass
             # Συγχώνευση τιμών χρήστη πάνω από τα defaults
             if loaded_materials:
                 self.estimator.materials.update(loaded_materials)
+                # Αφού εφαρμόστηκαν τιμές από αρχείο στην εκκίνηση, σημείωσε ότι είναι ενεργές
+                self._csv_applied = True
+                try:
+                    # Αποθήκευση λίστας κωδικών για σωστή εμφάνιση κατάστασης
+                    self._last_loaded_codes = set(loaded_materials.keys())
+                except Exception:
+                    pass
+            # Αν υπάρχει default CSV, αποθήκευση διαδρομής για μελλοντικό save
+            try:
+                default_csv = self._materials_csv_path()
+                if default_csv.exists():
+                    self._current_csv_path = default_csv
+            except Exception:
+                pass
         except Exception:
             self.estimator = None
+        # Ενημέρωση ένδειξης πηγής τιμών
+        try:
+            self._update_price_source_label()
+        except Exception:
+            pass
+        # Εμφάνιση μηνύματος status για την πηγή τιμών (μόνο την πρώτη φορά)
+        if not getattr(self, '_price_source_announced', True):
+            try:
+                if self._current_csv_path:
+                    name = (self._current_csv_path.name
+                            if isinstance(self._current_csv_path, Path)
+                            else Path(str(self._current_csv_path)).name)
+                    self.statusBar().showMessage(f"Φορτώθηκαν τιμές από: {name}", 5000)
+                else:
+                    self.statusBar().showMessage("Χρήση προεπιλεγμένων τιμών υλικών", 5000)
+            except Exception:
+                pass
+            self._price_source_announced = True
         return self.estimator
 
     def _close_perimeter(self):
@@ -394,10 +475,10 @@ class MainWindow(QMainWindow):
                 ])
                 # Αποθήκευση του code για να ξέρουμε ποιο υλικό επεξεργαζόμαστε
                 item.setData(0, Qt.UserRole, line.code)
-                # Επιτρέπουμε edit σε όλο το item, αλλά θα χειριστούμε μόνο τη στήλη 3
+                # Επιτρέπουμε edit συνολικά, αλλά το delegate θα ενεργοποιήσει editor μόνο στη στήλη 3
                 item.setFlags(item.flags() | Qt.ItemIsEditable)
                 self.bom_tree.addTopLevelItem(item)
-            self.bom_total_label.setText(f"Υποσύνολο: {bom.subtotal:.2f} {bom.currency}")
+            self.bom_total_label.setText(f"Σύνολο: {bom.subtotal:.2f} {bom.currency}")
             self.bom_tree.blockSignals(False)
         except Exception:
             # Safe no-op if dock isn't ready
@@ -418,17 +499,19 @@ class MainWindow(QMainWindow):
             est = self._ensure_estimator()
             if est is None:
                 return
-            txt = item.text(3).strip().replace(",", ".")
-            new_price = float(txt) if txt else 0.0
+            # Parse value allowing comma or dot, then force fixed 2-decimal format to avoid scientific notation.
+            raw_txt = item.text(3)
+            txt = (raw_txt or "").strip().replace(",", ".")
+            try:
+                new_price = float(txt) if txt else 0.0
+            except Exception:
+                new_price = 0.0
             # Ενημέρωση υλικού στον estimator
             mat = est.materials.get(code)
             if mat is None:
                 est.materials[code] = MaterialItem(code=code, name=item.text(0), unit=item.text(1), unit_price=new_price)
             else:
                 mat.unit_price = new_price
-                # Συγχρονίζουμε προαιρετικά name/unit από στήλες (αν αλλάξουν)
-                mat.name = item.text(0)
-                mat.unit = item.text(1)
             # Αναυπολογισμός γραμμής και υποσυνόλου
             try:
                 qty = float(item.text(2)) if item.text(2) else 0.0
@@ -436,6 +519,8 @@ class MainWindow(QMainWindow):
                 qty = 0.0
             total = qty * new_price
             self.bom_tree.blockSignals(True)
+            # Reformat edited cell (unit price) consistently
+            item.setText(3, f"{new_price:.2f}")
             item.setText(4, f"{total:.2f}")
             # Σήμανση ότι η αλλαγή ήταν χειροκίνητη
             try:
@@ -452,11 +537,107 @@ class MainWindow(QMainWindow):
                     pass
             curr = getattr(est, 'currency', 'EUR')
             self.bom_total_label.setText(f"Υποσύνολο: {subtotal:.2f} {curr}")
+
         finally:
             try:
                 self.bom_tree.blockSignals(False)
             except Exception:
                 pass
+
+    def _save_materials_to_csv(self, path: Path) -> bool:
+        est = self._ensure_estimator()
+        if est is None:
+            return False
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Backup αν υπάρχει ήδη
+            if path.exists():
+                try:
+                    backup = path.parent / (path.name + ".bak")
+                    backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+                except Exception:
+                    pass
+            # Γράψιμο σε προσωρινό αρχείο και atomic replace
+            tmp = path.parent / (path.name + ".tmp")
+            with tmp.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["code", "name", "unit", "unit_price"])
+                for code in sorted(est.materials.keys()):
+                    m = est.materials[code]
+                    price_str = f"{float(m.unit_price or 0.0):.2f}"
+                    writer.writerow([m.code, m.name, m.unit, price_str])
+            tmp.replace(path)
+            return True
+        except Exception:
+            return False
+
+
+    def _save_prices_csv_action(self):
+        # Χειροκίνητη αποθήκευση σε CSV
+        try:
+            path = self._current_csv_path
+            if not path:
+                return self._save_prices_csv_as_action()
+            ok = self._save_materials_to_csv(path)
+            if ok:
+                try:
+                    self.statusBar().showMessage(f"Αποθηκεύτηκαν οι τιμές στο {path.name}", 5000)
+                except Exception:
+                    pass
+                self._csv_applied = True
+                self._update_price_source_label()
+            else:
+                QMessageBox.warning(self, "Σφάλμα", "Η αποθήκευση τιμών σε CSV απέτυχε.")
+        except Exception as e:
+            QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία αποθήκευσης τιμών CSV: {e}")
+
+    def _save_prices_csv_as_action(self):
+        # Αποθήκευση Ως… CSV
+        try:
+            fname, _ = QFileDialog.getSaveFileName(
+                self,
+                "Αποθήκευση τιμών ως (CSV)",
+                str(self._materials_csv_path()),
+                "CSV αρχεία (*.csv);;Όλα τα αρχεία (*)",
+            )
+            if not fname:
+                return
+            path = Path(fname)
+            ok = self._save_materials_to_csv(path)
+            if ok:
+                self._current_csv_path = path
+                self._csv_applied = True
+                try:
+                    self.statusBar().showMessage(f"Αποθηκεύτηκαν οι τιμές στο {path.name}", 5000)
+                except Exception:
+                    pass
+                self._update_price_source_label()
+            else:
+                QMessageBox.warning(self, "Σφάλμα", "Η αποθήκευση τιμών σε CSV απέτυχε.")
+        except Exception as e:
+            QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία αποθήκευσης τιμών CSV: {e}")
+
+    def _reset_prices_to_defaults(self):
+        """Επαναφορά σε προεπιλεγμένες τιμές ΜΟΝΟ για το τρέχον session (μη καταστροφική)."""
+        try:
+            est = self._ensure_estimator()
+            if est is None:
+                return
+            est.materials = default_material_catalog()
+            # Δεν διαγράφουμε/πειράζουμε κανένα αρχείο. Απλώς σημειώνουμε ότι το CSV (αν υπάρχει) δεν είναι πλέον εφαρμοσμένο.
+            if self._current_csv_path:
+                self._csv_applied = False
+            self._last_loaded_codes = set()
+            self._last_loaded_errors = set()
+            self._recompute_bom_if_possible()
+            self._update_price_source_label()
+            try:
+                self.statusBar().showMessage("Επαναφέρθηκαν οι προεπιλεγμένες τιμές (μη καταστροφικά).", 5000)
+            except Exception:
+                pass
+        except Exception as e:
+            QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία επαναφοράς προεπιλογών: {e}")
+
 
     def _materials_file_path(self) -> Path:
         # Legacy JSON default path in repo root
@@ -472,23 +653,87 @@ class MainWindow(QMainWindow):
         except Exception:
             return Path.cwd() / "materials.csv"
 
-    def _load_materials_from_disk(self) -> dict:
-        path = self._materials_file_path()
+    def _user_defaults_csv_path(self) -> Path:
+        try:
+            root = Path(__file__).resolve().parent.parent
+        except Exception:
+            root = Path.cwd()
+        cfg = root / "config"
+        cfg.mkdir(exist_ok=True)
+        return cfg / "userdefaults.csv"
+
+    def _load_user_defaults(self) -> dict:
+        path = self._user_defaults_path
         if not path.exists():
             return {}
         try:
-            data = json.loads(path.read_text(encoding='utf-8'))
-            materials = {}
-            for code, info in data.items():
-                materials[code] = MaterialItem(
-                    code=code,
-                    name=info.get('name', code),
-                    unit=info.get('unit', 'piece'),
-                    unit_price=float(info.get('unit_price', 0.0)),
-                )
-            return materials
+            with path.open("r", encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f)
+                materials = {}
+                for row in reader:
+                    code = (row.get("code") or "").strip()
+                    if not code:
+                        continue
+                    name = (row.get("name") or code).strip()
+                    unit = (row.get("unit") or "piece").strip()
+                    try:
+                        unit_price = float((row.get("unit_price") or "0").replace(",", "."))
+                    except Exception:
+                        unit_price = 0.0
+                    materials[code] = MaterialItem(code=code, name=name, unit=unit, unit_price=unit_price)
+                return materials
         except Exception:
             return {}
+
+    def _save_user_defaults(self):
+        est = self._ensure_estimator()
+        if est is None:
+            return False
+        path = self._user_defaults_path
+        try:
+            with path.open("w", encoding="utf-8", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["code", "name", "unit", "unit_price"])
+                for code in sorted(est.materials.keys()):
+                    m = est.materials[code]
+                    w.writerow([m.code, m.name, m.unit, f"{float(m.unit_price or 0.0):.2f}"])
+            self._user_defaults_active = True
+            return True
+        except Exception:
+            return False
+
+    def _revert_main_defaults(self):
+        # Διαγραφή userdefaults και επιστροφή στα embedded defaults
+        try:
+            path = self._user_defaults_path
+            if path.exists():
+                try:
+                    backup = path.with_suffix(".bak")
+                    backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+                except Exception:
+                    pass
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            est = self._ensure_estimator()
+            if est is None:
+                return
+            est.materials = default_material_catalog()
+            # Αν υπάρχει ενεργό csv το ξαναεφαρμόζουμε μετά τα main defaults
+            if self._current_csv_path and Path(self._current_csv_path).exists():
+                mats = self._read_csv_materials(Path(self._current_csv_path))[0]
+                if mats:
+                    est.materials.update(mats)
+                    self._csv_applied = True
+            self._user_defaults_active = False
+            self._recompute_bom_if_possible()
+            self._update_price_source_label()
+            self.statusBar().showMessage("Επιστροφή στις Κύριες Προεπιλογές.", 5000)
+        except Exception as e:
+            QMessageBox.warning(self, "Προεπιλογές", f"Αποτυχία επιστροφής κύριων προεπιλογών: {e}")
+
+    # JSON-based materials are no longer supported; only embedded defaults + CSV overrides are used.
 
     def _load_materials_from_csv_disk(self) -> dict:
         path = self._materials_csv_path()
@@ -513,27 +758,14 @@ class MainWindow(QMainWindow):
         except Exception:
             return {}
 
-    def _import_prices_csv_dialog(self):
-        # Άνοιγμα διαλόγου για CSV και εισαγωγή τιμών
+    def _read_csv_materials(self, path: Path):
+        """Διαβάζει ένα CSV αρχείο υλικών και επιστρέφει (materials_dict, loaded_codes_set, error_codes_set)."""
+        materials = {}
+        loaded_codes = set()
+        error_codes = set()
         try:
-            fname, _ = QFileDialog.getOpenFileName(
-                self,
-                "Επιλογή αρχείου τιμών (CSV)",
-                str(self._materials_csv_path().parent),
-                "CSV αρχεία (*.csv);;Όλα τα αρχεία (*)",
-            )
-            if not fname:
-                return
-            path = Path(fname)
-            if not path.exists():
-                QMessageBox.warning(self, "Σφάλμα", "Το αρχείο δεν υπάρχει.")
-                return
-            # Φόρτωση CSV
             with path.open("r", encoding="utf-8", newline="") as f:
                 reader = csv.DictReader(f)
-                loaded_codes = set()
-                error_codes = set()
-                materials = {}
                 for row in reader:
                     code = (row.get("code") or "").strip()
                     if not code:
@@ -549,6 +781,26 @@ class MainWindow(QMainWindow):
                         continue
                     materials[code] = MaterialItem(code=code, name=name, unit=unit, unit_price=unit_price)
                     loaded_codes.add(code)
+        except Exception:
+            pass
+        return materials, loaded_codes, error_codes
+
+    def _import_prices_csv_dialog(self):
+        # Άνοιγμα διαλόγου για CSV και εισαγωγή τιμών
+        try:
+            fname, _ = QFileDialog.getOpenFileName(
+                self,
+                "Επιλογή αρχείου τιμών (CSV)",
+                str(self._materials_csv_path().parent),
+                "CSV αρχεία (*.csv);;Όλα τα αρχεία (*)",
+            )
+            if not fname:
+                return
+            path = Path(fname)
+            if not path.exists():
+                QMessageBox.warning(self, "Σφάλμα", "Το αρχείο δεν υπάρχει.")
+                return
+            materials, loaded_codes, error_codes = self._read_csv_materials(path)
 
             est = self._ensure_estimator()
             if est is None:
@@ -557,9 +809,16 @@ class MainWindow(QMainWindow):
             if materials:
                 # Συγχώνευση με τα ήδη υπάρχοντα (κρατάμε defaults και ενημερώνουμε/προσθέτουμε όσα υπάρχουν στο CSV)
                 est.materials.update(materials)
+                # Θυμόμαστε το μονοπάτι του CSV για μελλοντική αποθήκευση
+                self._current_csv_path = path
                 self._last_loaded_codes = loaded_codes
                 self._last_loaded_errors = error_codes
+                self._csv_applied = True
                 self._recompute_bom_if_possible()
+                try:
+                    self._update_price_source_label()
+                except Exception:
+                    pass
                 updated_list = sorted(list(loaded_codes - error_codes))
                 error_list = sorted(list(error_codes))
                 msg = [
@@ -580,103 +839,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία φόρτωσης τιμών CSV: {e}")
 
-    def _save_materials_json(self):
-        est = self._ensure_estimator()
-        if est is None:
-            return
-        path = self._materials_file_path()
-        try:
-            # Προαιρετικό backup
-            if path.exists():
-                backup = path.with_suffix('.json.bak')
-                try:
-                    backup.write_text(path.read_text(encoding='utf-8'), encoding='utf-8')
-                except Exception:
-                    pass
-            data = {}
-            for code, m in est.materials.items():
-                data[code] = {
-                    'name': m.name,
-                    'unit': m.unit,
-                    'unit_price': float(m.unit_price or 0.0),
-                }
-            tmp = path.with_suffix('.json.tmp')
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-            tmp.replace(path)
-            try:
-                self.statusBar().showMessage(f"Αποθηκεύτηκαν οι τιμές στο {path.name}", 5000)
-            except Exception:
-                pass
-        except Exception as e:
-            QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία αποθήκευσης τιμών: {e}")
-
-    def _load_materials_json(self):
-        # Άνοιγμα διαλόγου αρχείου και φόρτωση από επιλεγμένο JSON
-        try:
-            fname, _ = QFileDialog.getOpenFileName(
-                self,
-                "Επιλογή αρχείου τιμών (JSON)",
-                str(self._materials_file_path().parent),
-                "JSON αρχεία (*.json);;Όλα τα αρχεία (*)",
-            )
-            if not fname:
-                return
-            path = Path(fname)
-            if not path.exists():
-                QMessageBox.warning(self, "Σφάλμα", "Το αρχείο δεν υπάρχει.")
-                return
-            # Διάβασε και επικύρωσε δεδομένα
-            raw = json.loads(path.read_text(encoding='utf-8'))
-            loaded_codes = set()
-            error_codes = set()
-            materials = {}
-            for code, info in (raw.items() if isinstance(raw, dict) else []):
-                try:
-                    unit_price = float(info.get('unit_price', 0.0))
-                except Exception:
-                    error_codes.add(code)
-                    continue
-                materials[code] = MaterialItem(
-                    code=code,
-                    name=info.get('name', code),
-                    unit=info.get('unit', 'piece'),
-                    unit_price=unit_price,
-                )
-                loaded_codes.add(code)
-
-            est = self._ensure_estimator()
-            if est is None:
-                return
-
-            if materials:
-                # Συγχώνευση με τα ήδη υπάρχοντα (κρατάμε defaults και ενημερώνουμε/προσθέτουμε όσα υπάρχουν στο JSON)
-                est.materials.update(materials)
-                # Αποθήκευση status σε ιδιότητες για εμφάνιση στη στήλη "Κατάσταση"
-                self._last_loaded_codes = loaded_codes
-                self._last_loaded_errors = error_codes
-                # Επανυπολογισμός BOM
-                self._recompute_bom_if_possible()
-                # Περίληψη αποτελεσμάτων
-                updated_list = sorted(list(loaded_codes - error_codes))
-                error_list = sorted(list(error_codes))
-                # Μήνυμα περίληψης
-                msg = [
-                    f"Ενημερώθηκαν: {len(updated_list)}",
-                    f"Με σφάλμα: {len(error_list)}",
-                ]
-                if updated_list:
-                    msg.append("\nΚωδικοί ενημερώθηκαν (ενδεικτικά): " + ", ".join(updated_list[:10]) + (" …" if len(updated_list) > 10 else ""))
-                if error_list:
-                    msg.append("Κωδικοί με σφάλμα: " + ", ".join(error_list[:10]) + (" …" if len(error_list) > 10 else ""))
-                QMessageBox.information(self, "Φόρτωση Τιμών", "\n".join(msg))
-                try:
-                    self.statusBar().showMessage(f"Φορτώθηκαν τιμές από: {path.name}", 5000)
-                except Exception:
-                    pass
-            else:
-                QMessageBox.information(self, "Φόρτωση Τιμών", "Δεν βρέθηκαν έγκυρες τιμές στο αρχείο.")
-        except Exception as e:
-            QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία φόρτωσης τιμών: {e}")
+    # JSON import/export removed: only CSV import + embedded defaults supported.
 
     def _update_info_pane(self, info: dict | None):
         if info is None:
@@ -808,3 +971,54 @@ class MainWindow(QMainWindow):
                     "Invalid Input",
                     "Please enter valid numeric values for column heights."
                 )
+
+    def _update_price_source_label(self):
+        """Ενημερώνει το label με την τρέχουσα πηγή τιμών (CSV ή Προεπιλογές)."""
+        try:
+            lbl = getattr(self, 'price_source_label', None)
+            if lbl is None:
+                return
+            p = self._current_csv_path
+            pth = None
+            if p:
+                pth = p if isinstance(p, Path) else Path(str(p))
+            if pth and pth.exists() and self._csv_applied:
+                lbl.setText(f"Αρχείο τιμών (ενεργό): {pth.name}")
+                lbl.setToolTip(str(pth))
+            elif pth and pth.exists() and not self._csv_applied:
+                lbl.setText(f"Αρχείο τιμών διαθέσιμο: {pth.name} — Προεπιλογές σε χρήση")
+                lbl.setToolTip("Το αρχείο υπάρχει αλλά δεν έχει εφαρμοστεί (μετά από επαναφορά). Επιλέξτε 'Επαναφόρτωση'.")
+            elif pth and not pth.exists():
+                lbl.setText(f"Αρχείο τιμών δεν βρέθηκε: {pth.name} — Προεπιλογές")
+                lbl.setToolTip(str(pth))
+            else:
+                lbl.setText("Τιμές: Προεπιλογές")
+                lbl.setToolTip("")
+        except Exception:
+            pass
+
+    def _reload_current_csv_prices(self):
+        """Επαναφορτώνει το τρέχον CSV (αν υπάρχει) εφαρμόζοντας τις τιμές πάνω από τα defaults."""
+        try:
+            path = self._current_csv_path
+            if not path or not isinstance(path, Path) or not path.exists():
+                QMessageBox.information(self, "Επαναφόρτωση", "Δεν υπάρχει διαθέσιμο αρχείο CSV για επαναφόρτωση.")
+                return
+            est = self._ensure_estimator()
+            if est is None:
+                return
+            # Ξεκίνα από καθαρές προεπιλογές
+            est.materials = default_material_catalog()
+            materials, loaded_codes, error_codes = self._read_csv_materials(path)
+            if materials:
+                est.materials.update(materials)
+                self._last_loaded_codes = loaded_codes
+                self._last_loaded_errors = error_codes
+                self._csv_applied = True
+                self._recompute_bom_if_possible()
+                self._update_price_source_label()
+                self.statusBar().showMessage(f"Επαναφορτώθηκαν τιμές από: {path.name}", 5000)
+            else:
+                QMessageBox.information(self, "Επαναφόρτωση", "Δεν βρέθηκαν έγκυρες τιμές στο CSV.")
+        except Exception as e:
+            QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία επαναφόρτωσης CSV: {e}")
