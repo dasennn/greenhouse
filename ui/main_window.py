@@ -93,6 +93,11 @@ class MainWindow(QMainWindow):
         self._create_info_dock()
         self.view.perimeter_closed.connect(self._on_perimeter_closed)
         self._last_xy = None  # cache last perimeter points for optional recompute
+        # Ensure estimator (and user defaults) are loaded immediately at startup
+        try:
+            self._ensure_estimator()
+        except Exception:
+            pass
 
     def _create_toolbar(self):
         self.toolbar = QToolBar("Εργαλεία", self)
@@ -174,22 +179,22 @@ class MainWindow(QMainWindow):
         act_import.triggered.connect(self._import_prices_csv_dialog)
         menu.addAction(act_import)
 
-        act_save = QAction("Αποθήκευση", self)
-        act_save.triggered.connect(self._save_prices_csv_action)
+        act_save = QAction("Αποθήκευση (CSV)", self)
+        act_save.triggered.connect(self._save_prices_csv_as_action)
         menu.addAction(act_save)
 
-        act_save_as = QAction("Αποθήκευση Ως…", self)
-        act_save_as.triggered.connect(self._save_prices_csv_as_action)
-        menu.addAction(act_save_as)
-
-        act_reload = QAction("Επαναφόρτωση", self)
-        act_reload.triggered.connect(self._reload_current_csv_prices)
-        menu.addAction(act_reload)
-
         menu.addSeparator()
+        act_save_user_defaults = QAction("Ορισμός ως Προεπιλογές", self)
+        act_save_user_defaults.triggered.connect(self._save_user_defaults)
+        menu.addAction(act_save_user_defaults)
+
         act_reset = QAction("Επαναφορά Προεπιλογών", self)
         act_reset.triggered.connect(self._reset_prices_to_defaults)
         menu.addAction(act_reset)
+
+        act_factory_reset = QAction("Επαναφορά Εργοστασιακών", self)
+        act_factory_reset.triggered.connect(self._factory_reset)
+        menu.addAction(act_factory_reset)
 
         self.prices_button.setMenu(menu)
         self.toolbar.addWidget(self.prices_button)
@@ -301,34 +306,14 @@ class MainWindow(QMainWindow):
             self.estimator = None
             return None
         try:
-            # Φόρτωση τιμών από CSV (αν υπάρχει)
-        # Πάντα εκκίνηση με defaults και συγχώνευση των φορτωμένων, ώστε να μη χαθούν υλικά που δεν υπάρχουν στο αρχείο
-            loaded_materials = self._load_materials_from_csv_disk()
-            # Δημιουργία estimator με defaults
+            # Δημιουργία estimator με καθαρά defaults (χωρίς αυτόματη φόρτωση CSV)
             self.estimator = Estimator(scale_factor=self.view.scale_factor)
-            # Εφαρμογή user defaults εάν υπάρχει αρχείο userdefaults.csv
+            # Εφαρμογή user defaults εάν υπάρχει αρχείο userdefaults.csv (μόνιμες προσαρμογές χρήστη)
             try:
                 user_defs = self._load_user_defaults()
                 if user_defs:
                     self.estimator.materials.update(user_defs)
                     self._user_defaults_active = True
-            except Exception:
-                pass
-            # Συγχώνευση τιμών χρήστη πάνω από τα defaults
-            if loaded_materials:
-                self.estimator.materials.update(loaded_materials)
-                # Αφού εφαρμόστηκαν τιμές από αρχείο στην εκκίνηση, σημείωσε ότι είναι ενεργές
-                self._csv_applied = True
-                try:
-                    # Αποθήκευση λίστας κωδικών για σωστή εμφάνιση κατάστασης
-                    self._last_loaded_codes = set(loaded_materials.keys())
-                except Exception:
-                    pass
-            # Αν υπάρχει default CSV, αποθήκευση διαδρομής για μελλοντικό save
-            try:
-                default_csv = self._materials_csv_path()
-                if default_csv.exists():
-                    self._current_csv_path = default_csv
             except Exception:
                 pass
         except Exception:
@@ -572,25 +557,6 @@ class MainWindow(QMainWindow):
             return False
 
 
-    def _save_prices_csv_action(self):
-        # Χειροκίνητη αποθήκευση σε CSV
-        try:
-            path = self._current_csv_path
-            if not path:
-                return self._save_prices_csv_as_action()
-            ok = self._save_materials_to_csv(path)
-            if ok:
-                try:
-                    self.statusBar().showMessage(f"Αποθηκεύτηκαν οι τιμές στο {path.name}", 5000)
-                except Exception:
-                    pass
-                self._csv_applied = True
-                self._update_price_source_label()
-            else:
-                QMessageBox.warning(self, "Σφάλμα", "Η αποθήκευση τιμών σε CSV απέτυχε.")
-        except Exception as e:
-            QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία αποθήκευσης τιμών CSV: {e}")
-
     def _save_prices_csv_as_action(self):
         # Αποθήκευση Ως… CSV
         try:
@@ -618,21 +584,31 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία αποθήκευσης τιμών CSV: {e}")
 
     def _reset_prices_to_defaults(self):
-        """Επαναφορά σε προεπιλεγμένες τιμές ΜΟΝΟ για το τρέχον session (μη καταστροφική)."""
+        """Επαναφορά σε προεπιλεγμένες τιμές (καθαρίζει import και γυρνάει στα embedded defaults ή user defaults)."""
         try:
             est = self._ensure_estimator()
             if est is None:
                 return
+            # Ξαναφορτώνουμε defaults + user defaults (αν υπάρχουν)
             est.materials = default_material_catalog()
-            # Δεν διαγράφουμε/πειράζουμε κανένα αρχείο. Απλώς σημειώνουμε ότι το CSV (αν υπάρχει) δεν είναι πλέον εφαρμοσμένο.
-            if self._current_csv_path:
-                self._csv_applied = False
+            try:
+                user_defs = self._load_user_defaults()
+                if user_defs:
+                    est.materials.update(user_defs)
+                    self._user_defaults_active = True
+                else:
+                    self._user_defaults_active = False
+            except Exception:
+                self._user_defaults_active = False
+            # Καθαρισμός κατάστασης import
+            self._current_csv_path = None
+            self._csv_applied = False
             self._last_loaded_codes = set()
             self._last_loaded_errors = set()
             self._recompute_bom_if_possible()
             self._update_price_source_label()
             try:
-                self.statusBar().showMessage("Επαναφέρθηκαν οι προεπιλεγμένες τιμές (μη καταστροφικά).", 5000)
+                self.statusBar().showMessage("Επαναφέρθηκαν προεπιλογές.", 5000)
             except Exception:
                 pass
         except Exception as e:
@@ -686,9 +662,11 @@ class MainWindow(QMainWindow):
             return {}
 
     def _save_user_defaults(self):
+        """Αποθηκεύει τις τρέχουσες τιμές ως μόνιμες user defaults (config/userdefaults.csv)."""
         est = self._ensure_estimator()
         if est is None:
-            return False
+            QMessageBox.warning(self, "User Defaults", "Δεν υπάρχει estimator.")
+            return
         path = self._user_defaults_path
         try:
             with path.open("w", encoding="utf-8", newline="") as f:
@@ -698,40 +676,66 @@ class MainWindow(QMainWindow):
                     m = est.materials[code]
                     w.writerow([m.code, m.name, m.unit, f"{float(m.unit_price or 0.0):.2f}"])
             self._user_defaults_active = True
-            return True
-        except Exception:
-            return False
+            self._update_price_source_label()
+            QMessageBox.information(self, "Προεπιλογές", f"Αποθηκεύτηκαν οι τιμές ως μόνιμες προεπιλογές.\n\nΑρχείο: {path.name}\n\nΣτην επόμενη εκκίνηση θα φορτώνονται αυτόματα.")
+            try:
+                self.statusBar().showMessage(f"Αποθηκεύτηκαν user defaults: {path.name}", 5000)
+            except Exception:
+                pass
+        except Exception as e:
+            QMessageBox.warning(self, "User Defaults", f"Αποτυχία αποθήκευσης: {e}")
 
-    def _revert_main_defaults(self):
-        # Διαγραφή userdefaults και επιστροφή στα embedded defaults
+    def _factory_reset(self):
+        """Επαναφορά εργοστασιακών ρυθμίσεων: διαγραφή user defaults και επιστροφή στα hardcore defaults."""
         try:
             path = self._user_defaults_path
-            if path.exists():
+            has_user_defaults = path.exists()
+            
+            if has_user_defaults:
+                reply = QMessageBox.question(
+                    self,
+                    "Επαναφορά Εργοστασιακών",
+                    "Θα διαγραφούν οι μόνιμες προεπιλογές σου (User Defaults) και θα επανέλθουν οι εργοστασιακές τιμές.\n\n"
+                    f"Αρχείο: {path.name}\n(Θα δημιουργηθεί backup: {path.name}.bak)\n\n"
+                    "Θέλεις να συνεχίσεις;",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    return
+                # Δημιουργία backup
                 try:
                     backup = path.with_suffix(".bak")
                     backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
                 except Exception:
                     pass
+                # Διαγραφή user defaults
                 try:
                     path.unlink(missing_ok=True)
                 except Exception:
                     pass
+            
+            # Επιστροφή σε hardcore defaults
             est = self._ensure_estimator()
             if est is None:
                 return
             est.materials = default_material_catalog()
-            # Αν υπάρχει ενεργό csv το ξαναεφαρμόζουμε μετά τα main defaults
-            if self._current_csv_path and Path(self._current_csv_path).exists():
-                mats = self._read_csv_materials(Path(self._current_csv_path))[0]
-                if mats:
-                    est.materials.update(mats)
-                    self._csv_applied = True
             self._user_defaults_active = False
+            self._current_csv_path = None
+            self._csv_applied = False
+            self._last_loaded_codes = set()
+            self._last_loaded_errors = set()
             self._recompute_bom_if_possible()
             self._update_price_source_label()
-            self.statusBar().showMessage("Επιστροφή στις Κύριες Προεπιλογές.", 5000)
+            
+            if has_user_defaults:
+                QMessageBox.information(self, "Εργοστασιακές Ρυθμίσεις", "Επαναφέρθηκαν οι εργοστασιακές τιμές.\n\nΤα User Defaults διαγράφηκαν.")
+            try:
+                self.statusBar().showMessage("Επαναφέρθηκαν εργοστασιακές ρυθμίσεις.", 5000)
+            except Exception:
+                pass
         except Exception as e:
-            QMessageBox.warning(self, "Προεπιλογές", f"Αποτυχία επιστροφής κύριων προεπιλογών: {e}")
+            QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία επαναφοράς εργοστασιακών: {e}")
 
     # JSON-based materials are no longer supported; only embedded defaults + CSV overrides are used.
 
@@ -973,52 +977,23 @@ class MainWindow(QMainWindow):
                 )
 
     def _update_price_source_label(self):
-        """Ενημερώνει το label με την τρέχουσα πηγή τιμών (CSV ή Προεπιλογές)."""
+        """Ενημερώνει το label με την τρέχουσα πηγή τιμών (CSV, User Defaults, ή Προεπιλογές)."""
         try:
             lbl = getattr(self, 'price_source_label', None)
             if lbl is None:
                 return
+            # Απλή λογική: αν υπάρχει ενεργό CSV δείξε το, αλλιώς defaults
             p = self._current_csv_path
-            pth = None
-            if p:
-                pth = p if isinstance(p, Path) else Path(str(p))
-            if pth and pth.exists() and self._csv_applied:
-                lbl.setText(f"Αρχείο τιμών (ενεργό): {pth.name}")
-                lbl.setToolTip(str(pth))
-            elif pth and pth.exists() and not self._csv_applied:
-                lbl.setText(f"Αρχείο τιμών διαθέσιμο: {pth.name} — Προεπιλογές σε χρήση")
-                lbl.setToolTip("Το αρχείο υπάρχει αλλά δεν έχει εφαρμοστεί (μετά από επαναφορά). Επιλέξτε 'Επαναφόρτωση'.")
-            elif pth and not pth.exists():
-                lbl.setText(f"Αρχείο τιμών δεν βρέθηκε: {pth.name} — Προεπιλογές")
-                lbl.setToolTip(str(pth))
+            if p and isinstance(p, Path) and self._csv_applied:
+                lbl.setText(f"Τιμές: {p.name}")
+                lbl.setToolTip(str(p))
+            elif getattr(self, '_user_defaults_active', False):
+                lbl.setText("Τιμές: User Defaults")
+                lbl.setToolTip("Φορτώθηκαν μόνιμες προσαρμογές από config/userdefaults.csv")
             else:
                 lbl.setText("Τιμές: Προεπιλογές")
-                lbl.setToolTip("")
+                lbl.setToolTip("Ενσωματωμένες προεπιλεγμένες τιμές")
         except Exception:
             pass
 
-    def _reload_current_csv_prices(self):
-        """Επαναφορτώνει το τρέχον CSV (αν υπάρχει) εφαρμόζοντας τις τιμές πάνω από τα defaults."""
-        try:
-            path = self._current_csv_path
-            if not path or not isinstance(path, Path) or not path.exists():
-                QMessageBox.information(self, "Επαναφόρτωση", "Δεν υπάρχει διαθέσιμο αρχείο CSV για επαναφόρτωση.")
-                return
-            est = self._ensure_estimator()
-            if est is None:
-                return
-            # Ξεκίνα από καθαρές προεπιλογές
-            est.materials = default_material_catalog()
-            materials, loaded_codes, error_codes = self._read_csv_materials(path)
-            if materials:
-                est.materials.update(materials)
-                self._last_loaded_codes = loaded_codes
-                self._last_loaded_errors = error_codes
-                self._csv_applied = True
-                self._recompute_bom_if_possible()
-                self._update_price_source_label()
-                self.statusBar().showMessage(f"Επαναφορτώθηκαν τιμές από: {path.name}", 5000)
-            else:
-                QMessageBox.information(self, "Επαναφόρτωση", "Δεν βρέθηκαν έγκυρες τιμές στο CSV.")
-        except Exception as e:
-            QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία επαναφόρτωσης CSV: {e}")
+    # Επαναφόρτωση αφαιρέθηκε: η εκκίνηση δεν φορτώνει αυτόματα CSV πλέον.
