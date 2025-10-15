@@ -196,6 +196,10 @@ class MainWindow(QMainWindow):
         act_factory_reset.triggered.connect(self._factory_reset)
         menu.addAction(act_factory_reset)
 
+        act_restore_backup = QAction("Επαναφορά από Backup", self)
+        act_restore_backup.triggered.connect(self._restore_user_defaults_from_backup)
+        menu.addAction(act_restore_backup)
+
         self.prices_button.setMenu(menu)
         self.toolbar.addWidget(self.prices_button)
 
@@ -736,6 +740,78 @@ class MainWindow(QMainWindow):
                 pass
         except Exception as e:
             QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία επαναφοράς εργοστασιακών: {e}")
+
+    def _restore_user_defaults_from_backup(self):
+        """Restore a userdefaults backup (.bak) into config/userdefaults.csv and reload it.
+
+        Opens a file dialog in the config directory to pick a .bak file. After confirmation
+        the selected backup is copied over the active userdefaults file and the estimator
+        is reloaded with the restored values.
+        """
+        try:
+            cfg_dir = self._user_defaults_path.parent if hasattr(self, '_user_defaults_path') else self._user_defaults_csv_path().parent
+            # Let the user choose a .bak file (start in config/)
+            fname, _ = QFileDialog.getOpenFileName(
+                self,
+                "Επιλογή αντιγράφου ασφαλείας (Backup)",
+                str(cfg_dir),
+                "Backup αρχεία (*.bak);;Όλα τα αρχεία (*)",
+            )
+            if not fname:
+                return
+            bak = Path(fname)
+            if not bak.exists():
+                QMessageBox.warning(self, "Σφάλμα", "Το επιλεγμένο αρχείο αντιγράφου ασφαλείας δεν υπάρχει.")
+                return
+
+            # Confirm with the user
+            reply = QMessageBox.question(
+                self,
+                "Επαναφορά από Backup",
+                f"Επαναφορά του backup:\n{bak.name}\n\nΘέλεις να αντιγραφεί στο {self._user_defaults_path.name} και να εφαρμοστεί;",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+            # Ensure config dir exists and copy contents
+            try:
+                self._user_defaults_path.parent.mkdir(parents=True, exist_ok=True)
+                self._user_defaults_path.write_text(bak.read_text(encoding='utf-8'), encoding='utf-8')
+            except Exception as e:
+                QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία επαναφοράς backup: {e}")
+                return
+
+            # Reload user defaults into estimator
+            est = self._ensure_estimator()
+            try:
+                user_defs = self._load_user_defaults()
+                if user_defs:
+                    if est is not None:
+                        est.materials.update(user_defs)
+                    self._user_defaults_active = True
+                else:
+                    # If the restored file contained no valid rows, clear the flag
+                    self._user_defaults_active = False
+            except Exception:
+                self._user_defaults_active = False
+
+            # Reflect changes in UI
+            self._current_csv_path = None
+            self._csv_applied = False
+            self._last_loaded_codes = set()
+            self._last_loaded_errors = set()
+            self._recompute_bom_if_possible()
+            self._update_price_source_label()
+
+            QMessageBox.information(self, "Επαναφορά Backup", f"Επαναφέρθηκαν τα User Defaults από: {bak.name}")
+            try:
+                self.statusBar().showMessage(f"Επαναφέρθηκαν user defaults από: {bak.name}", 5000)
+            except Exception:
+                pass
+        except Exception as e:
+            QMessageBox.warning(self, "Σφάλμα", f"Απέτυχε η επαναφορά από backup: {e}")
 
     # JSON-based materials are no longer supported; only embedded defaults + CSV overrides are used.
 
