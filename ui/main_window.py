@@ -1,4 +1,4 @@
-from PySide6.QtGui import QPalette, QColor, QDoubleValidator
+from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
@@ -10,36 +10,26 @@ from PySide6.QtWidgets import (
     QLabel,
     QWidget,
     QVBoxLayout,
-    QPushButton,
-    QHBoxLayout,
     QFileDialog,
-    QStyledItemDelegate,
-    QLineEdit,
     QToolButton,
     QMenu,
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QActionGroup
+
 from services.estimator import Estimator, default_material_catalog
 from services.models import MaterialItem, BillOfMaterials
-from ui.drawing_view import DrawingView
-from PySide6.QtGui import QAction, QActionGroup
-from ui.column_height_dialog import ColumnHeightDialog
 from services.geometry_utils import (
     compute_grid_coverage as geom_compute_grid_coverage,
     estimate_triangle_posts_3x5_with_sides,
     estimate_gutters_length,
 )
+from ui.drawing_view import DrawingView
+from ui.column_height_dialog import ColumnHeightDialog
+from ui.delegates import PriceOnlyDelegate
+
 from pathlib import Path
 import csv
-
-class PriceOnlyDelegate(QStyledItemDelegate):
-    """Delegate that allows editing only for the Unit Price column (index 3)."""
-    def createEditor(self, parent, option, index):
-        if index.column() == 3:
-            editor = QLineEdit(parent)
-            editor.setValidator(QDoubleValidator(0.0, 1e12, 4, parent))
-            return editor
-        return None
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -62,14 +52,10 @@ class MainWindow(QMainWindow):
         self.setPalette(palette)
 
         self.resize(1024, 768)
-
-        # Lazy-created estimator (connected to backend/services if available)
-        self.estimator = None
+        self.estimator = None  # lazy-created when needed
 
         self.view = DrawingView(self)
         self.setCentralWidget(self.view)
-        self.resize(1024, 768)
-        self.estimator = None  # lazy-created when needed
         self.large_column_height = None
         self.small_column_height = None
         # Κατάσταση τελευταίας φόρτωσης τιμών από αρχείο
@@ -116,8 +102,8 @@ class MainWindow(QMainWindow):
         mode_group.setExclusive(True)
         modes = [
             ("Δείκτης",      self.view.toggle_pointer_mode),
-            ("Πολυγραμμή",   self.view.toggle_polyline_mode),
-            ("Οδηγοί",       self.view.toggle_guide_mode),
+            ("Γραμμή",   self.view.toggle_polyline_mode),
+            ("Βοηθητικές",       self.view.toggle_guide_mode),
             ("Μετακίνηση",   self.view.toggle_pan_mode),
         ]
         for label, handler in modes:
@@ -132,12 +118,12 @@ class MainWindow(QMainWindow):
 
         # Άλλα εργαλεία
         tools = [
-            ("Αναίρεση",            self.view.undo,            "Ctrl+Z"),
-            ("Επανάληψη",           self.view.redo,            "Ctrl+Y"),
+            ("Undo",            self.view.undo,            "Ctrl+Z"),
+            ("Redo",           self.view.redo,            "Ctrl+Y"),
             ("Διαγραφή",            self.view.delete_selected, "Del"),
             ("Διαγραφή όλων",       self._clear_all_and_reset, None),
-            ("Κλείσιμο Περιμέτρου", self._close_perimeter,     None),
             ("Διαγραφή Οδηγών",     self.view.clear_guides,    None),
+            ("Κλείσιμο Περιμέτρου", self._close_perimeter,     None),            
         ]
         for label, handler, shortcut in tools:
             act = QAction(label, self)
@@ -157,7 +143,7 @@ class MainWindow(QMainWindow):
         self.grid_selector.setObjectName("GreenhouseTypeSelector")
         # Presets: label -> (grid_w_m, grid_h_m)
         self._grid_presets = {
-            "3x5 με πλευρές (5x3 m)": (5.0, 3.0),
+            "3x5 (5x3 m)": (5.0, 3.0),
             "5x4 (5x4 m)": (5.0, 4.0),
             "4x4 (4x4 m)": (4.0, 4.0),
             "Προσαρμοσμένο…": None,
@@ -184,7 +170,7 @@ class MainWindow(QMainWindow):
         menu.addAction(act_save)
 
         menu.addSeparator()
-        act_save_user_defaults = QAction("Ορισμός ως Προεπιλογές", self)
+        act_save_user_defaults = QAction("Ορισμός ως Προεπιλογές Χρήστη", self)
         act_save_user_defaults.triggered.connect(self._save_user_defaults)
         menu.addAction(act_save_user_defaults)
 
@@ -212,16 +198,16 @@ class MainWindow(QMainWindow):
 
         self.bom_tree = QTreeWidget(container)
         self.bom_tree.setColumnCount(6)
-        self.bom_tree.setHeaderLabels(["Είδος", "Μονάδα", "Ποσότητα", "Τιμή Μονάδας", "Σύνολο", "Κατάσταση"]) 
+        self.bom_tree.setHeaderLabels(["Είδος", "Μονάδα", "Ποσότητα", "Τιμή Μονάδας", "Υποσύνολο", "Κατάσταση"]) 
         self.bom_tree.setRootIsDecorated(False)
         self.bom_tree.setItemDelegate(PriceOnlyDelegate(self.bom_tree))
         self.bom_tree.itemChanged.connect(self._on_bom_item_changed)
         layout.addWidget(self.bom_tree)
 
-        self.bom_total_label = QLabel("Υποσύνολο: 0.00 EUR", container)
+        self.bom_total_label = QLabel("Σύνολο: 0.00 EUR", container)
         layout.addWidget(self.bom_total_label)
 
-        self.price_source_label = QLabel("Αρχείο τιμών: Προεπιλογές", container)
+        self.price_source_label = QLabel("Αρχείο τιμών: Αρχικές", container)
         self.price_source_label.setObjectName("PriceSourceLabel")
         layout.addWidget(self.price_source_label)
 
@@ -618,14 +604,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία επαναφοράς προεπιλογών: {e}")
 
-
-    def _materials_file_path(self) -> Path:
-        # Legacy JSON default path in repo root
-        try:
-            return Path(__file__).resolve().parent.parent / "materials.json"
-        except Exception:
-            return Path.cwd() / "materials.json"
-
     def _materials_csv_path(self) -> Path:
         # Default CSV path in repo root
         try:
@@ -813,31 +791,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Σφάλμα", f"Απέτυχε η επαναφορά από backup: {e}")
 
-    # JSON-based materials are no longer supported; only embedded defaults + CSV overrides are used.
-
-    def _load_materials_from_csv_disk(self) -> dict:
-        path = self._materials_csv_path()
-        if not path.exists():
-            return {}
-        try:
-            with path.open("r", encoding="utf-8", newline="") as f:
-                reader = csv.DictReader(f)
-                materials = {}
-                for row in reader:
-                    code = (row.get("code") or "").strip()
-                    if not code:
-                        continue
-                    name = (row.get("name") or code).strip()
-                    unit = (row.get("unit") or "piece").strip()
-                    try:
-                        unit_price = float((row.get("unit_price") or "0").replace(",", "."))
-                    except Exception:
-                        unit_price = 0.0
-                    materials[code] = MaterialItem(code=code, name=name, unit=unit, unit_price=unit_price)
-                return materials
-        except Exception:
-            return {}
-
     def _read_csv_materials(self, path: Path):
         """Διαβάζει ένα CSV αρχείο υλικών και επιστρέφει (materials_dict, loaded_codes_set, error_codes_set)."""
         materials = {}
@@ -918,8 +871,6 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Εισαγωγή Τιμών", "Δεν βρέθηκαν έγκυρες τιμές στο αρχείο.")
         except Exception as e:
             QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία φόρτωσης τιμών CSV: {e}")
-
-    # JSON import/export removed: only CSV import + embedded defaults supported.
 
     def _update_info_pane(self, info: dict | None):
         if info is None:
@@ -1071,5 +1022,3 @@ class MainWindow(QMainWindow):
                 lbl.setToolTip("Ενσωματωμένες προεπιλεγμένες τιμές")
         except Exception:
             pass
-
-    # Επαναφόρτωση αφαιρέθηκε: η εκκίνηση δεν φορτώνει αυτόματα CSV πλέον.
