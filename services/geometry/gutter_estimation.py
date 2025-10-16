@@ -65,7 +65,8 @@ def estimate_gutters_length(
     width_m = width_px / scale_factor
     depth_m = depth_px / scale_factor
 
-    module_w_m = 2.0 * grid_w_m
+    # Align gutter vertical lines with triangle modules (now 5 m)
+    module_w_m = 1.0 * grid_w_m
     if module_w_m <= 0 or grid_h_m <= 0:
         return None
     n_full = int(width_m // module_w_m)
@@ -87,5 +88,5 @@ def estimate_gutters_length(
         "piece_len_m": piece_len_m,
         "pieces_per_line": pieces_per_line,
         "total_pieces": total_pieces,
-        "notes": "lines_x = max(2, floor(width/(2*grid_w))+1); pieces_per_line = ceil(depth/grid_h).",
+        "notes": "lines_x = max(2, floor(width/(grid_w))+1); pieces_per_line = ceil(depth/grid_h).",
     }

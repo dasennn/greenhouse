@@ -1,0 +1,42 @@
+{
+  "version": "1.0",
+  "grid": {
+    "w_m": 5.0,
+    "h_m": 3.0,
+    "scale_factor": 5.0
+  },
+  "geometry": {
+    "points": [
+      [
+        -225.0,
+        -202.5
+      ],
+      [
+        12.5,
+        -202.5
+      ],
+      [
+        12.5,
+        0.0
+      ],
+      [
+        -250.0,
+        0.0
+      ]
+    ],
+    "guides": []
+  },
+  "columns": {
+    "large": 0.0,
+    "small": 0.0
+  },
+  "materials": {
+    "source": "defaults",
+    "csv_path": null
+  },
+  "meta": {
+    "name": "ρςρερ",
+    "original_path": null,
+    "autosave": true
+  }
+}

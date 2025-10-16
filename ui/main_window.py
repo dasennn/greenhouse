@@ -13,8 +13,13 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QToolButton,
     QMenu,
+    QDialog,
+    QLineEdit,
+    QFormLayout,
+    QDialogButtonBox,
+    QDoubleSpinBox,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPointF, QTimer
 from PySide6.QtGui import QAction, QActionGroup
 
 from services.estimator import Estimator, default_material_catalog
@@ -30,6 +35,77 @@ from ui.delegates import PriceOnlyDelegate
 
 from pathlib import Path
 import csv
+import json
+
+PROJECT_EXT = ".ghp"
+
+
+class NewProjectDialog(QDialog):
+    """Dialog to create a new project: asks for name and greenhouse type (grid)."""
+    def __init__(self, parent=None, presets: dict | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Νέα Μελέτη")
+        self._presets = presets or {}
+
+        form = QFormLayout(self)
+
+        # Name
+        self.name_edit = QLineEdit(self)
+        self.name_edit.setPlaceholderText("Όνομα μελέτης")
+        form.addRow("Όνομα:", self.name_edit)
+
+        # Type (grid preset)
+        self.type_combo = QComboBox(self)
+        labels = list(self._presets.keys()) if self._presets else []
+        for lbl in labels:
+            self.type_combo.addItem(lbl)
+        if labels:
+            self.type_combo.setCurrentIndex(0)
+        form.addRow("Τύπος θερμοκηπίου:", self.type_combo)
+
+        # Custom grid inputs (hidden unless 'Προσαρμοσμένο…')
+        self.spin_w = QDoubleSpinBox(self)
+        self.spin_w.setRange(0.1, 100.0)
+        self.spin_w.setDecimals(2)
+        self.spin_w.setValue(5.0)
+        self.spin_h = QDoubleSpinBox(self)
+        self.spin_h.setRange(0.1, 100.0)
+        self.spin_h.setDecimals(2)
+        self.spin_h.setValue(3.0)
+        form.addRow("Πλάτος κελιού (m):", self.spin_w)
+        form.addRow("Ύψος κελιού (m):", self.spin_h)
+
+        # Toggle visibility based on selection
+        def on_type_changed(_):
+            sel = self.type_combo.currentText()
+            is_custom = (sel.strip() == "Προσαρμοσμένο…")
+            self.spin_w.setVisible(is_custom)
+            self.spin_h.setVisible(is_custom)
+            # Optionally prefill custom with selected preset values
+            if not is_custom and sel in self._presets and self._presets[sel]:
+                gw, gh = self._presets[sel]
+                try:
+                    self.spin_w.setValue(float(gw))
+                    self.spin_h.setValue(float(gh))
+                except Exception:
+                    pass
+
+        self.type_combo.currentTextChanged.connect(on_type_changed)
+        on_type_changed(0)
+
+        # Buttons
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        form.addRow(btns)
+
+    def get_values(self):
+        """Return (name, type_label, grid_w_m, grid_h_m)."""
+        name = (self.name_edit.text() or "").strip()
+        type_label = self.type_combo.currentText()
+        w = float(self.spin_w.value())
+        h = float(self.spin_h.value())
+        return name, type_label, w, h
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -71,7 +147,17 @@ class MainWindow(QMainWindow):
         # Χρήστη προσαρμοσμένες προεπιλογές (αν υπάρχουν) σε config/userdefaults.csv
         self._user_defaults_path = self._user_defaults_csv_path()
         self._user_defaults_active = False
+        # Project state
+        self._project_path = None
+        self._project_name = None
+        self._project_defined = False
+        self._autosave_timer = None
+        self._autosave_path = self._autosave_file_path()
+        self._autosave_enabled = True
+        self._dirty = False
 
+        # Menubar and primary UI
+        self._create_menubar()
         # Create toolbar first, then docks so toggles can be added
         self._create_toolbar()
         # Create BOM dock then info dock, then stack them on the right
@@ -79,9 +165,21 @@ class MainWindow(QMainWindow):
         self._create_info_dock()
         self.view.perimeter_closed.connect(self._on_perimeter_closed)
         self._last_xy = None  # cache last perimeter points for optional recompute
+        # Window title
+        try:
+            self._update_window_title()
+        except Exception:
+            pass
         # Ensure estimator (and user defaults) are loaded immediately at startup
         try:
             self._ensure_estimator()
+        except Exception:
+            pass
+
+        # Startup: prompt user to create or continue project, then start autosave
+        try:
+            self._startup_project_prompt()
+            self._start_autosave_timer()
         except Exception:
             pass
 
@@ -120,10 +218,11 @@ class MainWindow(QMainWindow):
         tools = [
             ("Undo",            self.view.undo,            "Ctrl+Z"),
             ("Redo",           self.view.redo,            "Ctrl+Y"),
-            ("Διαγραφή",            self.view.delete_selected, "Del"),
+            ("Διαγραφή",            self._delete_selected_and_mark_dirty, "Del"),
+            ("Διαγραφή Οδηγών",     self._clear_guides_and_mark_dirty,    None),
             ("Διαγραφή όλων",       self._clear_all_and_reset, None),
-            ("Διαγραφή Οδηγών",     self.view.clear_guides,    None),
             ("Κλείσιμο Περιμέτρου", self._close_perimeter,     None),            
+            ("Zoom στο Σχέδιο",     self._zoom_to_drawing,     "Ctrl+0"),
         ]
         for label, handler, shortcut in tools:
             act = QAction(label, self)
@@ -188,6 +287,12 @@ class MainWindow(QMainWindow):
 
         self.prices_button.setMenu(menu)
         self.toolbar.addWidget(self.prices_button)
+
+    def _zoom_to_drawing(self):
+        try:
+            self.view.zoom_to_drawing()
+        except Exception:
+            pass
 
     def _create_bom_dock(self):
         self.bom_dock = QDockWidget("Υλικά & Κόστος", self)
@@ -281,12 +386,28 @@ class MainWindow(QMainWindow):
         # Update view state and refresh drawing
         self.view.greenhouse_type = "3x5_with_sides"  # keep current logic; pattern depends only on grid size for now
         try:
+            # Redraw triangles according to new grid
+            try:
+                self.view.triangle_manager.grid_w_m = self.view.grid_w_m
+                self.view.triangle_manager.grid_h_m = self.view.grid_h_m
+                if getattr(self.view.state, 'perimeter_locked', False):
+                    self.view.triangle_manager.clear_triangles()
+                    self.view.triangle_manager.draw_north_triagonals(self.view.state.points)
+                    # Also refresh overlay diagnostics (posts/gutters/coverage)
+                    self.view.recompute_overlay_if_possible()
+            except Exception:
+                pass
             self.view.viewport().update()
         except Exception:
             pass
         # Optionally recompute BOM and info if a perimeter exists (using cached xy)
         self._recompute_bom_if_possible()
         self._recompute_info_if_possible()
+        # Changing grid is a project-level change
+        try:
+            self._mark_dirty()
+        except Exception:
+            pass
 
     def _ensure_estimator(self):
         """Create an Estimator once, if available. Returns the instance or None."""
@@ -420,6 +541,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(summary, 8000)
         except Exception:
             # if no status bar, quietly ignore (don't print to console)
+            pass
+        # Mark project as modified due to geometry change
+        try:
+            self._mark_dirty()
+        except Exception:
             pass
 
     def _update_bom_pane(self, bom: BillOfMaterials | None):
@@ -579,7 +705,7 @@ class MainWindow(QMainWindow):
             est = self._ensure_estimator()
             if est is None:
                 return
-            # Ξαναφορτώνουμε defaults + user defaults (αν υπάρχουν)
+            # Reload defaults + user defaults (if any)
             est.materials = default_material_catalog()
             try:
                 user_defs = self._load_user_defaults()
@@ -599,6 +725,10 @@ class MainWindow(QMainWindow):
             self._update_price_source_label()
             try:
                 self.statusBar().showMessage("Επαναφέρθηκαν προεπιλογές.", 5000)
+            except Exception:
+                pass
+            try:
+                self._mark_dirty()
             except Exception:
                 pass
         except Exception as e:
@@ -714,6 +844,10 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Εργοστασιακές Ρυθμίσεις", "Επαναφέρθηκαν οι εργοστασιακές τιμές.\n\nΤα User Defaults διαγράφηκαν.")
             try:
                 self.statusBar().showMessage("Επαναφέρθηκαν εργοστασιακές ρυθμίσεις.", 5000)
+            except Exception:
+                pass
+            try:
+                self._mark_dirty()
             except Exception:
                 pass
         except Exception as e:
@@ -852,6 +986,11 @@ class MainWindow(QMainWindow):
                     self._update_price_source_label()
                 except Exception:
                     pass
+                # Mark session dirty due to materials change
+                try:
+                    self._mark_dirty()
+                except Exception:
+                    pass
                 updated_list = sorted(list(loaded_codes - error_codes))
                 error_list = sorted(list(error_codes))
                 msg = [
@@ -882,6 +1021,523 @@ class MainWindow(QMainWindow):
                 self.info_tree.addTopLevelItem(item)
         except Exception:
             pass
+
+    # ---------------------------
+    # Project (Μελέτη) menu
+    # ---------------------------
+    def _create_menubar(self):
+        mb = self.menuBar()
+        proj = mb.addMenu("Μελέτη")
+        # New Project
+        act_new = QAction("Νέα Μελέτη", self)
+        act_new.setShortcut("Ctrl+N")
+        act_new.triggered.connect(self._project_new)
+        proj.addAction(act_new)
+        # Open Project
+        act_open = QAction("Φόρτωση Μελέτης…", self)
+        act_open.setShortcut("Ctrl+O")
+        act_open.triggered.connect(self._project_open)
+        proj.addAction(act_open)
+        proj.addSeparator()
+        # Save / Save As
+        act_save = QAction("Αποθήκευση Μελέτης", self)
+        act_save.setShortcut("Ctrl+S")
+        act_save.triggered.connect(self._project_save)
+        proj.addAction(act_save)
+
+        act_save_as = QAction("Αποθήκευση Μελέτης ως…", self)
+        act_save_as.setShortcut("Ctrl+Shift+S")
+        act_save_as.triggered.connect(self._project_save_as)
+        proj.addAction(act_save_as)
+
+    def _project_title(self) -> str:
+        name = None
+        try:
+            name = self._project_name or (self._project_path.stem if self._project_path else None)
+        except Exception:
+            name = self._project_name
+        if name:
+            return f"Greenhouse – {name}"
+        return "Greenhouse – Νέα Μελέτη"
+
+    def _update_window_title(self):
+        t = self._project_title()
+        if getattr(self, '_dirty', False):
+            t += " *"
+        self.setWindowTitle(t)
+
+    def _mark_dirty(self):
+        self._dirty = True
+        try:
+            self._update_window_title()
+        except Exception:
+            pass
+
+    def _maybe_save_before_loss(self) -> bool:
+        """If there are unsaved changes, prompt to save/discard/cancel.
+        Returns True to proceed (after optional save), False to cancel.
+        """
+        if not getattr(self, '_dirty', False):
+                # Clear import state
+                self._current_csv_path = None
+                self._csv_applied = False
+                self._last_loaded_codes = set()
+                self._last_loaded_errors = set()
+        m = QMessageBox(self)
+        m.setWindowTitle("Μη αποθηκευμένες αλλαγές")
+        m.setText("Θέλεις να αποθηκεύσεις τις αλλαγές στη μελέτη;")
+        save_btn = m.addButton("Αποθήκευση", QMessageBox.AcceptRole)
+        discard_btn = m.addButton("Να μην αποθηκευτεί", QMessageBox.DestructiveRole)
+        cancel_btn = m.addButton("Άκυρο", QMessageBox.RejectRole)
+        m.setIcon(QMessageBox.Warning)
+        m.exec()
+        clicked = m.clickedButton()
+        if clicked is save_btn:
+            ok = self._project_save()
+            return bool(ok)
+        if clicked is cancel_btn:
+            return False
+        return True
+
+    def _project_new(self) -> bool:
+        """Create a new project after asking for name and greenhouse type (grid)."""
+        # Ask to save unsaved changes
+        if not self._maybe_save_before_loss():
+            return False
+        dlg = NewProjectDialog(self, presets=getattr(self, '_grid_presets', None))
+        if dlg.exec() != QDialog.Accepted:
+            # If user cancels, keep current state; user can still draw freely.
+            try:
+                self.statusBar().showMessage("Ακυρώθηκε η δημιουργία νέας μελέτης.", 3000)
+            except Exception:
+                pass
+            return False
+        name, type_label, w, h = dlg.get_values()
+        if not name:
+            name = "Μελέτη"
+        self._apply_new_project_name(name)
+
+        # Apply chosen grid based on type
+        chosen_w, chosen_h = None, None
+        try:
+            if type_label in getattr(self, '_grid_presets', {}):
+                preset = self._grid_presets[type_label]
+                if preset is None:
+                    # Custom
+                    chosen_w, chosen_h = float(w), float(h)
+                else:
+                    chosen_w, chosen_h = float(preset[0]), float(preset[1])
+            else:
+                # Fallback to dialog values
+                chosen_w, chosen_h = float(w), float(h)
+        except Exception:
+            chosen_w, chosen_h = float(w), float(h)
+
+        # Set view grid values
+        try:
+            self.view.grid_w_m = chosen_w
+            self.view.grid_h_m = chosen_h
+        except Exception:
+            pass
+        # Sync toolbar combobox display without triggering the change dialog again
+        try:
+            self.grid_selector.blockSignals(True)
+            # match label if exists, else select custom
+            idx = self.grid_selector.findText(type_label)
+            if idx >= 0:
+                self.grid_selector.setCurrentIndex(idx)
+            else:
+                idx = self.grid_selector.findText("Προσαρμοσμένο…")
+                if idx >= 0:
+                    self.grid_selector.setCurrentIndex(idx)
+            self.grid_selector.blockSignals(False)
+        except Exception:
+            pass
+
+        # Clear drawing and state for new project
+        self.view.clear_all()
+        self._last_xy = None
+        self._dirty = False
+        try:
+            self._update_window_title()
+            self.statusBar().showMessage(
+                f"Νέα μελέτη: {self._project_name} – Πλέγμα {self.view.grid_w_m:g}×{self.view.grid_h_m:g} m",
+                5000,
+            )
+        except Exception:
+            pass
+        return True
+
+    def _project_open(self) -> bool:
+        # Ask to save unsaved changes first
+        if not self._maybe_save_before_loss():
+            return False
+        try:
+            fname, _ = QFileDialog.getOpenFileName(self, "Φόρτωση Μελέτης", str(Path.cwd()), f"Greenhouse Project (*{PROJECT_EXT});;Όλα τα αρχεία (*)")
+            if not fname:
+                return False
+            path = Path(fname)
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except Exception as e:
+            QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία φόρτωσης μελέτης: {e}")
+            return False
+        ok = self._apply_project_dict(data)
+        if ok:
+            self._project_path = path
+            # Use explicit name if present; else derive from path
+            try:
+                self._project_name = (data or {}).get("meta", {}).get("name") or path.stem
+            except Exception:
+                self._project_name = path.stem
+            self._project_defined = True
+            self._dirty = False
+            try:
+                self._update_window_title()
+                self.statusBar().showMessage(f"Φορτώθηκε: {path.name}", 5000)
+            except Exception:
+                pass
+            return True
+        return False
+
+    def _project_save(self):
+        if not self._project_path:
+            return self._project_save_as()
+        data = self._project_to_dict()
+        try:
+            self._project_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+            try:
+                self.statusBar().showMessage(f"Αποθηκεύτηκε: {self._project_path.name}", 4000)
+            except Exception:
+                pass
+            self._dirty = False
+            try:
+                self._update_window_title()
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία αποθήκευσης: {e}")
+            return False
+
+    def _project_save_as(self):
+        try:
+            suggested = (self._project_name or "project") + PROJECT_EXT
+            fname, _ = QFileDialog.getSaveFileName(self, "Αποθήκευση Μελέτης ως…", str(self._projects_dir_path() / suggested), f"Greenhouse Project (*{PROJECT_EXT});;Όλα τα αρχεία (*)")
+            if not fname:
+                return False
+            path = Path(fname)
+            if path.suffix.lower() != PROJECT_EXT:
+                path = path.with_suffix(PROJECT_EXT)
+            data = self._project_to_dict()
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+            self._project_path = path
+            # Use explicit project name (stem) if not already set
+            if not self._project_name:
+                try:
+                    self._project_name = path.stem
+                except Exception:
+                    pass
+            self._project_defined = True
+            self._dirty = False
+            try:
+                self._update_window_title()
+                self.statusBar().showMessage(f"Αποθηκεύτηκε: {path.name}", 5000)
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία αποθήκευσης: {e}")
+            return False
+
+    def _project_to_dict(self) -> dict:
+        # Serialize current view state and minimal app settings into JSON-ready dict
+        pts = []
+        try:
+            for p in self.view.state.points:
+                try:
+                    pts.append([float(p.x()), float(p.y())])
+                except Exception:
+                    pts.append([float(p[0]), float(p[1])])
+        except Exception:
+            pts = []
+        guides = []
+        try:
+            for s, e in self.view.state.guides:
+                guides.append([[float(s.x()), float(s.y())], [float(e.x()), float(e.y())]])
+        except Exception:
+            guides = []
+
+        # Materials source hint (optional metadata)
+        mat_src = "defaults"
+        csv_path = None
+        try:
+            if getattr(self, '_current_csv_path', None):
+                mat_src = "csv"
+                csv_path = str(self._current_csv_path)
+            elif getattr(self, '_user_defaults_active', False):
+                mat_src = "user_defaults"
+        except Exception:
+            pass
+
+        data = {
+            "version": "1.0",
+            "grid": {
+                "w_m": float(getattr(self.view, 'grid_w_m', 5.0) or 5.0),
+                "h_m": float(getattr(self.view, 'grid_h_m', 3.0) or 3.0),
+                "scale_factor": float(getattr(self.view, 'scale_factor', 5.0) or 5.0),
+            },
+            "geometry": {
+                "points": pts,
+                "guides": guides,
+            },
+            "columns": {
+                "large": float(self.large_column_height or 0.0),
+                "small": float(self.small_column_height or 0.0),
+            },
+            "materials": {
+                "source": mat_src,
+                "csv_path": csv_path,
+            },
+            "meta": {
+                "name": self._project_name,
+                "original_path": str(self._project_path) if self._project_path else None,
+                "autosave": False,
+            },
+        }
+        return data
+
+    def _apply_project_dict(self, data: dict) -> bool:
+        try:
+            g = (data or {}).get("grid", {})
+            self.view.grid_w_m = float(g.get("w_m", getattr(self.view, 'grid_w_m', 5.0)))
+            self.view.grid_h_m = float(g.get("h_m", getattr(self.view, 'grid_h_m', 3.0)))
+            sf = float(g.get("scale_factor", getattr(self.view, 'scale_factor', 5.0)))
+            try:
+                # Only update scale_factor if positive
+                if sf > 0:
+                    self.view.scale_factor = sf
+            except Exception:
+                pass
+
+            geom = (data or {}).get("geometry", {})
+            pts = geom.get("points", []) or []
+            guides = geom.get("guides", []) or []
+            # Apply to view state
+            self.view.state.points = [QPointF(float(x), float(y)) for (x, y) in pts]
+            self.view.state.guides = [(QPointF(float(sx), float(sy)), QPointF(float(ex), float(ey))) for ((sx, sy), (ex, ey)) in guides]
+            self.view.state.save_state()
+            self.view.perimeter_manager.refresh_perimeter()
+            self.view._refresh_guides()
+            try:
+                self.view.triangle_manager.grid_w_m = self.view.grid_w_m
+                self.view.triangle_manager.grid_h_m = self.view.grid_h_m
+                self.view.triangle_manager.clear_triangles()
+                if len(self.view.state.points) >= 3 and (self.view.state.points[0] == self.view.state.points[-1]):
+                    self.view.triangle_manager.draw_north_triagonals(self.view.state.points)
+                    self.view.state.perimeter_locked = True
+            except Exception:
+                pass
+
+            cols = (data or {}).get("columns", {})
+            try:
+                self.large_column_height = float(cols.get("large", 0.0) or 0.0)
+                self.small_column_height = float(cols.get("small", 0.0) or 0.0)
+            except Exception:
+                self.large_column_height, self.small_column_height = None, None
+
+            # Optional: restore material price source hint (no auto-load for safety)
+            mats = (data or {}).get("materials", {})
+            try:
+                src = mats.get("source")
+                path = mats.get("csv_path")
+                # We only annotate UI; do not auto-load external files without user consent
+                if src == "csv" and path:
+                    self._current_csv_path = Path(path)
+                    self._csv_applied = False
+                elif src == "user_defaults":
+                    self._user_defaults_active = True
+                else:
+                    self._current_csv_path = None
+                    self._user_defaults_active = False
+                self._update_price_source_label()
+            except Exception:
+                pass
+
+            # Cache xy for recompute, recompute overlays/BOM
+            self._last_xy = [(float(p.x()), float(p.y())) for p in self.view.state.points]
+            self._recompute_info_if_possible()
+            self._recompute_bom_if_possible()
+            self.view.recompute_overlay_if_possible()
+            try:
+                self.view.viewport().update()
+            except Exception:
+                pass
+            # Meta: name
+            try:
+                meta = (data or {}).get("meta", {})
+                nm = meta.get("name")
+                if nm:
+                    self._project_name = nm
+            except Exception:
+                pass
+            self._project_defined = True
+            self._dirty = False
+            return True
+        except Exception as e:
+            QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία εφαρμογής μελέτης: {e}")
+            return False
+
+    # ---------------------------
+    # Startup & Autosave helpers
+    # ---------------------------
+    def _projects_dir_path(self) -> Path:
+        try:
+            root = Path(__file__).resolve().parent.parent
+        except Exception:
+            root = Path.cwd()
+        p = root / "projects"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def _autosave_file_path(self) -> Path:
+        try:
+            root = Path(__file__).resolve().parent.parent
+        except Exception:
+            root = Path.cwd()
+        cfg = root / "config"
+        cfg.mkdir(parents=True, exist_ok=True)
+        return cfg / "autosave.ghp"
+
+    def _startup_project_prompt(self):
+        """Prompt on startup: continue previous autosave or create a new project by name."""
+        has_autosave = self._autosave_path.exists()
+        # Loop allows returning to choices if user cancels file open
+        for _ in range(2):  # at most 2 cycles to avoid infinite loop
+            if has_autosave:
+                m = QMessageBox(self)
+                m.setWindowTitle("Έναρξη Μελέτης")
+                m.setText("Θέλεις να συνεχίσεις από την τελευταία αυτόματη αποθήκευση, να ανοίξεις αποθηκευμένη μελέτη ή να ξεκινήσεις νέα μελέτη;")
+                btn_cont = m.addButton("Συνέχεια", QMessageBox.AcceptRole)
+                btn_open = m.addButton("Άνοιγμα…", QMessageBox.ActionRole)
+                btn_new = m.addButton("Νέα Μελέτη", QMessageBox.DestructiveRole)
+                m.setIcon(QMessageBox.Question)
+                m.exec()
+                if m.clickedButton() is btn_cont:
+                    try:
+                        data = json.loads(self._autosave_path.read_text(encoding='utf-8'))
+                        if isinstance(data, dict):
+                            data.setdefault("meta", {})
+                            data["meta"]["autosave"] = False
+                        if self._apply_project_dict(data):
+                            try:
+                                op = (data or {}).get("meta", {}).get("original_path")
+                                if op:
+                                    self._project_path = Path(op)
+                            except Exception:
+                                pass
+                            self._project_name = (data or {}).get("meta", {}).get("name") or (self._project_path.stem if self._project_path else None)
+                            self._project_defined = True
+                            try:
+                                self._update_window_title()
+                                self.statusBar().showMessage("Συνέχεια από αυτόματη αποθήκευση.", 4000)
+                            except Exception:
+                                pass
+                            return
+                    except Exception:
+                        pass
+                if m.clickedButton() is btn_open:
+                    ok = False
+                    try:
+                        ok = self._project_open()
+                    except Exception:
+                        ok = False
+                    if ok:
+                        return
+                    # else: loop again to show choices
+                    continue
+                # New project
+                if self._project_new():
+                    return
+                else:
+                    # user canceled new; allow drawing and exit prompt
+                    return
+            else:
+                m = QMessageBox(self)
+                m.setWindowTitle("Έναρξη Μελέτης")
+                m.setText("Θέλεις να ανοίξεις αποθηκευμένη μελέτη ή να ξεκινήσεις νέα;")
+                btn_open = m.addButton("Άνοιγμα…", QMessageBox.AcceptRole)
+                btn_new = m.addButton("Νέα Μελέτη", QMessageBox.DestructiveRole)
+                m.setIcon(QMessageBox.Question)
+                m.exec()
+                if m.clickedButton() is btn_open:
+                    ok = False
+                    try:
+                        ok = self._project_open()
+                    except Exception:
+                        ok = False
+                    if ok:
+                        return
+                    # try again once
+                    continue
+                if self._project_new():
+                    return
+                else:
+                    return
+
+    def closeEvent(self, event):
+        try:
+            proceed = self._maybe_save_before_loss()
+            if not proceed:
+                event.ignore()
+                return
+        except Exception:
+            pass
+        return super().closeEvent(event)
+
+    def _start_autosave_timer(self, interval_ms: int = 30000):
+        if not self._autosave_enabled:
+            return
+        if self._autosave_timer:
+            try:
+                self._autosave_timer.stop()
+            except Exception:
+                pass
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(interval_ms)
+        self._autosave_timer.timeout.connect(self._do_autosave)
+        self._autosave_timer.start()
+
+    def _do_autosave(self):
+        # Autosave unsaved sessions too, but only if there's content
+        has_content = False
+        try:
+            has_content = bool(self.view.state.points or self.view.state.guides)
+        except Exception:
+            has_content = False
+        if not (self._project_defined or has_content):
+            return
+        try:
+            data = self._project_to_dict()
+            # mark as autosave
+            try:
+                data.setdefault("meta", {})
+                data["meta"]["autosave"] = True
+            except Exception:
+                pass
+            self._autosave_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+            # Also drop a tiny meta file with timestamp if needed in future
+            try:
+                self.statusBar().showMessage("Αυτόματη αποθήκευση", 1500)
+            except Exception:
+                pass
+        except Exception:
+            # Silent fail is acceptable for autosave
+            pass
+
+    def _apply_new_project_name(self, name: str):
+        self._project_name = name
+        self._project_defined = True
+        # Do not assign a path yet; Save As will set it. Title updates automatically.
 
     def _recompute_bom_if_possible(self):
         if not self._last_xy:
@@ -982,6 +1638,29 @@ class MainWindow(QMainWindow):
             self.info_tree.clear()
         except Exception:
             pass
+        # Clearing everything is a modification
+        try:
+            self._mark_dirty()
+        except Exception:
+            pass
+
+    def _clear_guides_and_mark_dirty(self):
+        try:
+            self.view.clear_guides()
+        finally:
+            try:
+                self._mark_dirty()
+            except Exception:
+                pass
+
+    def _delete_selected_and_mark_dirty(self):
+        try:
+            self.view.delete_selected()
+        finally:
+            try:
+                self._mark_dirty()
+            except Exception:
+                pass
 
     def _set_column_heights(self):
         """Open a dialog to set the heights of large and small columns."""
@@ -996,6 +1675,10 @@ class MainWindow(QMainWindow):
                     "Column Heights Set",
                     f"Large Column Height: {large_height} m\nSmall Column Height: {small_height} m"
                 )
+                try:
+                    self._mark_dirty()
+                except Exception:
+                    pass
             else:
                 QMessageBox.warning(
                     self,

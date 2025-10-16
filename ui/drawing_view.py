@@ -168,7 +168,14 @@ class DrawingView(QGraphicsView):
                     "",
                     "Gutters estimation:",
                     f"Width: {gut['north_width_m']:.2f} m, Depth: {gut['depth_m']:.2f} m",
-                    f"Module width: {gut['module_w_m']:.2f} m (2×grid_w)",
+                    # Show module width and relation to grid_w
+                    (
+                        lambda mw, gw: (
+                            f"Module width: {mw:.2f} m ("
+                            + ("1×grid_w" if abs(mw-gw) < 1e-6 else ("2×grid_w" if abs(mw-2*gw) < 1e-6 else f"~{mw/gw:.2f}×grid_w"))
+                            + ")"
+                        )
+                    )(gut['module_w_m'], self.grid_w_m),
                     f"Vertical lines along Y: {gut['lines_x']} (includes edges)",
                     f"Piece length: {gut['piece_len_m']:.2f} m",
                     f"Pieces per line: {gut['pieces_per_line']}",
@@ -323,25 +330,57 @@ class DrawingView(QGraphicsView):
         factor = 1.2 if event.angleDelta().y() > 0 else 0.8
         self.scale(factor, factor)
 
-    def increase_grid(self):
-        self.grid_meters += 0.1
-        self.grid_size   = self.grid_meters * self.scale_factor
-        self.viewport().update()
+    def zoom_to_drawing(self):
+        """Zoom and center the view to the current drawing (perimeter and guides).
 
-    def decrease_grid(self):
-        self.grid_meters = max(0.01, self.grid_meters - 0.1)
-        self.grid_size   = self.grid_meters * self.scale_factor
-        self.viewport().update()
+        Fits the bounding rectangle of all relevant items into the viewport, with
+        a small margin. If there are no items, it recenters to scene rect.
+        """
+        try:
+            # Collect candidate points: perimeter points and guide endpoints
+            xs, ys = [], []
+            for p in self.state.points:
+                try:
+                    xs.append(p.x()); ys.append(p.y())
+                except Exception:
+                    try:
+                        xs.append(float(p[0])); ys.append(float(p[1]))
+                    except Exception:
+                        pass
+            for s, e in getattr(self.state, 'guides', []) or []:
+                try:
+                    xs += [s.x(), e.x()]; ys += [s.y(), e.y()]
+                except Exception:
+                    pass
 
-    def change_grid(self):
-        m, ok = QInputDialog.getDouble(
-            self, "Απόσταση Πλέγματος", "Εισάγετε απόσταση πλέγματος (μέτρα):",
-            self.grid_meters, 0.01, 100.0, 2
-        )
-        if ok:
-            self.grid_meters = m
-            self.grid_size   = m * self.scale_factor
-            self.viewport().update()
+            if xs and ys:
+                minx, maxx = min(xs), max(xs)
+                miny, maxy = min(ys), max(ys)
+                # Add padding in scene units (px); ~ one grid cell worth of padding
+                pad_x = max(20.0, 0.5 * self.grid_w_m * self.scale_factor)
+                pad_y = max(20.0, 0.5 * self.grid_h_m * self.scale_factor)
+                rect = QRectF(minx - pad_x, miny - pad_y, (maxx - minx) + 2*pad_x, (maxy - miny) + 2*pad_y)
+            else:
+                # No geometry yet; use a portion of the scene rect
+                rect = self.scene.sceneRect()
+
+            if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+                rect = self.scene.sceneRect()
+
+            # Reset any previous scaling then fit
+            self.resetTransform()
+            self.fitInView(rect, Qt.KeepAspectRatio)
+            # Slight zoom-out for breathing room
+            self.scale(0.98, 0.98)
+            # Center explicitly
+            self.centerOn(rect.center())
+        except Exception:
+            # Fallback: reset and center to full scene
+            try:
+                self.resetTransform()
+                self.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+            except Exception:
+                pass
 
     def toggle_osnap_mode(self, on: bool):
         self.state.osnap_enabled = on
@@ -447,6 +486,7 @@ class DrawingView(QGraphicsView):
             return scene_p, None
 
     def mousePressEvent(self, event):
+        # Allow drawing even without a named project; startup dialog still offers choices.
         # Clear any live dimension entry on click
         self.state._dim_input = ""
         self.preview_label.hide()
@@ -663,6 +703,7 @@ class DrawingView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
+        # Allow keyboard-driven creation even without a named project.
         if event.key() == Qt.Key_Escape and (self.state.polyline_enabled or self.state.guide_enabled or self.state.pan_enabled):
             self.toggle_pointer_mode(True)
             parent = self.parent()

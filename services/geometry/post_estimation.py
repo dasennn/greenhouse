@@ -21,11 +21,11 @@ def estimate_triangle_posts_3x5_with_sides(
     """Estimate total number of posts (low and tall) for a greenhouse with the
     repeating '3x5 with sides' triangular pattern extended across the whole depth.
 
-    Assumptions:
-      - Triangles are placed along the north horizontal segment with module width = 2 boxes (10 m).
-      - For each row (every 3 m, grid_h), the same triangle pattern repeats through the depth.
-      - Low posts are at base points along the north edge at each 5 m grid step.
-      - Tall posts are at each triangle apex (one per full triangle; half-triangle counts one apex).
+        Assumptions:
+            - Triangles are placed along the north horizontal segment with module width = 1 box (5 m).
+            - For each row (every grid_h), the same triangle pattern repeats through the depth.
+            - Low posts are at base points along the north edge at each 5 m grid step.
+            - Tall posts are at each triangle apex at midpoints (every 2.5 m relative to bases).
       - Polygon is roughly aligned to the 5x3 grid; north/south segments are used to measure width/rows.
 
     Args:
@@ -64,16 +64,16 @@ def estimate_triangle_posts_3x5_with_sides(
         return None
 
     # Triangles per row along width
-    module_px = 2.0 * grid_w_px  # 10 m
+    module_px = 1.0 * grid_w_px  # 5 m
     n_full = int(width_px // module_px)
     rem = width_px - n_full * module_px
-    has_half = rem >= (grid_w_px - 1e-6)
+    has_half = rem >= (0.5 * grid_w_px - 1e-6)
 
     # Posts per row (grid line):
-    # Tall posts: one per full triangle plus one if there is a half triangle remainder
+    # Tall posts: one per full 5 m triangle; add one if remainder >= 2.5 m (half triangle)
     tall_per_row = n_full + (1 if has_half else 0)
-    # Low posts: base corners of triangles: n_full + 1 endpoints (+1 if half triangle adds a new base end)
-    low_per_row = n_full + 1 + (1 if has_half else 0)
+    # Low posts: at base endpoints every 5 m => n_full + 1; remainder < 5 m does not add a new base endpoint
+    low_per_row = n_full + 1
 
     # Number of grid lines through depth = floor(depth/3m) + 1
     (sx1, sy1) = south["p1"]
@@ -159,7 +159,7 @@ def estimate_triangle_posts_3x5_with_sides_per_row(
     if grid_w_px <= 0 or grid_h_px <= 0:
         return None
 
-    module_px = 2.0 * grid_w_px
+    module_px = 1.0 * grid_w_px
     width_padding = 5.0 * grid_w_px
 
     height_px = max(0.0, south_y - north_y)
@@ -187,9 +187,9 @@ def estimate_triangle_posts_3x5_with_sides_per_row(
         for span_len in spans:
             n_full = int(span_len // module_px)
             rem = span_len - n_full * module_px
-            has_half = rem >= (grid_w_px - 1e-6)
+            has_half = rem >= (0.5 * grid_w_px - 1e-6)
             row_tall += n_full + (1 if has_half else 0)
-            row_low += n_full + 1 + (1 if has_half else 0)
+            row_low += n_full + 1
 
         total_low += row_low
         total_tall += row_tall

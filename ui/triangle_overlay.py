@@ -31,9 +31,9 @@ class TriangleOverlayManager:
         self.tri_items: List[QGraphicsPolygonItem] = []
     
     def draw_north_triagonals(self, points: List[QPointF]) -> None:
-        """Draw triangular lines along the north side every 2 grid boxes (10m).
-        
-        If leftover >= one box (5m), draw a half triangle.
+        """Draw triangular braces along the north side every 1 grid box (5 m).
+
+        If leftover >= half box (2.5 m), draw a half triangle.
         
         Args:
             points: List of perimeter points
@@ -56,40 +56,39 @@ class TriangleOverlayManager:
             x1, x2 = x2, x1
             y1, y2 = y2, y1
         y0 = 0.5 * (y1 + y2)
-        
+
         grid_w = self.grid_w_m * self.scale_factor
         grid_h = self.grid_h_m * self.scale_factor
-        module = 2 * grid_w  # two columns wide
+        module = grid_w  # one column wide (5 m)
         apex_y = y0 - grid_h  # point upwards by one grid height (toward north)
         pen = QPen(QColor("#555"), 2)
-        
+
         # Full triangles
         length = x2 - x1
         if length <= 0:
             return
-        
+
         n_full = int(length // module)
         x = x1
-        for i in range(n_full):
+        for _ in range(n_full):
             bx0 = x
             bx1 = x + module
-            ax = x + module * 0.5
+            ax = x + 0.5 * module
             # Full triangle polygon (base-left, apex, base-right)
             poly = QPolygonF([QPointF(bx0, y0), QPointF(ax, apex_y), QPointF(bx1, y0)])
-            item = self._create_triangle_item(poly, pen)
+            self._create_triangle_item(poly, pen)
             x += module
-        
-        # Half triangle if remainder >= one box (5m)
+
+        # Half triangle if remainder >= half box (2.5 m)
         rem = length - n_full * module
-        if rem >= grid_w - 1e-6:
+        half_w = 0.5 * grid_w
+        if rem >= (half_w - 1e-6):
             bx0 = x
-            bx1 = min(x2, x + grid_w)
+            bx1 = min(x2, x + half_w)
             top_y = y0 - grid_h
-            # Draw a right-triangle diagonal spanning exactly one grid box width and full height.
-            # From base-left (bx0, y0) to top-right (bx1, y0 - grid_h).
-            # Half-box diagonal represented as a triangular polygon (base-left, top-right, base-right)
+            # Right triangle for half module
             poly = QPolygonF([QPointF(bx0, y0), QPointF(bx1, top_y), QPointF(bx1, y0)])
-            item = self._create_triangle_item(poly, pen)
+            self._create_triangle_item(poly, pen)
     
     def _create_triangle_item(self, poly: QPolygonF, pen: QPen) -> QGraphicsPolygonItem:
         """Create a triangle graphics item with standard properties.

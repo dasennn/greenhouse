@@ -9,8 +9,8 @@ from .models import MaterialItem
 
 # List of tuples: (code, name, unit, unit_price)
 MATERIAL_DEFAULTS = [
-    ("post_tall",    "Κολόνα Υψηλή",       "piece", 18.50),
-    ("post_low",     "Κολόνα Χαμηλή",      "piece", 12.90),
+    ("post_tall",    "Στύλος Ψηλός",       "piece", 18.50),
+    ("post_low",     "Στύλος Χαμηλός",      "piece", 12.90),
     ("ridge_cap",    "Κορφιάτης",          "piece", 7.20),
     ("gutter_3m",    "Υδρορροή 3m",        "piece", 9.80),
     ("gutter_4m",    "Υδρορροή 4m",        "piece", 12.40),
