@@ -59,21 +59,22 @@ class PerimeterManager:
         self.point_items.clear()
         
         # Draw new items
+        breaks = set(getattr(self.state, 'breaks', []) or [])
         for i, pt in enumerate(self.state.points):
             # Add draggable point
             dot = DraggablePoint(self.view, i, pt)
             self.scene.addItem(dot)
             self.point_items.append(dot)
-            
-            # Add line segment if not first point
-            if i > 0:
+
+            # Add line segment if not first point and not a break between (i-1) and i
+            if i > 0 and (i - 1) not in breaks:
                 p0 = self.state.points[i - 1]
                 ln = QGraphicsLineItem(p0.x(), p0.y(), pt.x(), pt.y())
                 ln.setPen(QPen(QColor("green"), 2))
                 ln.setFlag(QGraphicsItem.ItemIsSelectable, True)
                 self.scene.addItem(ln)
                 self.perim_items.append(ln)
-                
+
                 # Add dimension label
                 dist = math.hypot(pt.x() - p0.x(), pt.y() - p0.y()) / self.scale_factor
                 mid = QPointF((p0.x() + pt.x()) / 2, (p0.y() + pt.y()) / 2)
@@ -121,6 +122,29 @@ class PerimeterManager:
 
             # Delete the requested index
             del self.state.points[idx]
+
+            # Update subpath breaks to reflect the deletion
+            try:
+                new_breaks = []
+                for b in list(getattr(self.state, 'breaks', []) or []):
+                    # If the break is exactly at the removed edge boundary, drop it
+                    if b == idx or b == idx - 1:
+                        continue
+                    # Shift breaks after the deleted index
+                    if b > idx:
+                        nb = b - 1
+                    else:
+                        nb = b
+                    # Keep only valid break positions (between 0 and len(points)-2)
+                    if 0 <= nb <= len(self.state.points) - 2:
+                        new_breaks.append(nb)
+                # De-duplicate and sort
+                self.state.breaks = sorted(set(new_breaks))
+            except Exception:
+                try:
+                    self.state.breaks = [b for b in getattr(self.state, 'breaks', []) if 0 <= b <= len(self.state.points) - 2]
+                except Exception:
+                    pass
 
             # If it was closed and we removed the original first point,
             # remove the trailing duplicate closing point (if any).

@@ -49,11 +49,6 @@ class NewProjectDialog(QDialog):
 
         form = QFormLayout(self)
 
-        # Name
-        self.name_edit = QLineEdit(self)
-        self.name_edit.setPlaceholderText("Όνομα μελέτης")
-        form.addRow("Όνομα:", self.name_edit)
-
         # Type (grid preset)
         self.type_combo = QComboBox(self)
         labels = list(self._presets.keys()) if self._presets else []
@@ -100,12 +95,11 @@ class NewProjectDialog(QDialog):
         form.addRow(btns)
 
     def get_values(self):
-        """Return (name, type_label, grid_w_m, grid_h_m)."""
-        name = (self.name_edit.text() or "").strip()
+        """Return (type_label, grid_w_m, grid_h_m)."""
         type_label = self.type_combo.currentText()
         w = float(self.spin_w.value())
         h = float(self.spin_h.value())
-        return name, type_label, w, h
+        return type_label, w, h
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -155,6 +149,21 @@ class MainWindow(QMainWindow):
         self._autosave_path = self._autosave_file_path()
         self._autosave_enabled = True
         self._dirty = False
+        # Optional project type label (human-friendly preset label)
+        self._project_type_label = None
+        # Status bar permanent labels
+        try:
+            self.status_project_label = QLabel("")
+            self.status_type_label = QLabel("")
+            self.status_grid_label = QLabel("")
+            sb = self.statusBar()
+            sb.addPermanentWidget(self.status_project_label)
+            sb.addPermanentWidget(self.status_type_label)
+            sb.addPermanentWidget(self.status_grid_label)
+        except Exception:
+            pass
+        # Suppress repeated save prompts when user chose "Don't Save" for current changes
+        self._suppress_save_prompt = False
 
         # Menubar and primary UI
         self._create_menubar()
@@ -170,30 +179,29 @@ class MainWindow(QMainWindow):
             self._update_window_title()
         except Exception:
             pass
+        # Initial status labels
+        try:
+            self._update_status_labels()
+        except Exception:
+            pass
         # Ensure estimator (and user defaults) are loaded immediately at startup
         try:
             self._ensure_estimator()
         except Exception:
             pass
 
-        # Startup: prompt user to create or continue project, then start autosave
+        # Startup prompt is deferred until the window is shown
+        self._startup_prompt_scheduled = False
+
+        # Mark project dirty on any geometry change while drawing
         try:
-            self._startup_project_prompt()
-            self._start_autosave_timer()
+            self.view.geometry_changed.connect(self._mark_dirty)
         except Exception:
             pass
 
     def _create_toolbar(self):
         self.toolbar = QToolBar("Εργαλεία", self)
         self.addToolBar(self.toolbar)
-
-        # OSnap
-        osnap_act = QAction("OSnap", self)
-        osnap_act.setCheckable(True)
-        osnap_act.setChecked(True)
-        osnap_act.toggled.connect(self.view.toggle_osnap_mode)
-        self.toolbar.addAction(osnap_act)
-        self.toolbar.addSeparator()
 
         # Κατάσταση λειτουργίας (αμοιβαία αποκλειόμενες)
         mode_group = QActionGroup(self)
@@ -214,12 +222,20 @@ class MainWindow(QMainWindow):
         mode_group.actions()[0].setChecked(True)
         self.toolbar.addSeparator()
 
+        # Ορθό (Axis Lock) toggle
+        ortho_act = QAction("Ορθό", self)
+        ortho_act.setCheckable(True)
+        ortho_act.setChecked(False)  # Start with free drawing
+        ortho_act.toggled.connect(self._toggle_ortho_mode)
+        self.toolbar.addAction(ortho_act)
+        self.toolbar.addSeparator()
+
         # Άλλα εργαλεία
         tools = [
             ("Undo",            self.view.undo,            "Ctrl+Z"),
             ("Redo",           self.view.redo,            "Ctrl+Y"),
             ("Διαγραφή",            self._delete_selected_and_mark_dirty, "Del"),
-            ("Διαγραφή Οδηγών",     self._clear_guides_and_mark_dirty,    None),
+            ("Διαγραφή Βοηθητικών",     self._clear_guides_and_mark_dirty,    None),
             ("Διαγραφή όλων",       self._clear_all_and_reset, None),
             ("Κλείσιμο Περιμέτρου", self._close_perimeter,     None),            
             ("Zoom στο Σχέδιο",     self._zoom_to_drawing,     "Ctrl+0"),
@@ -232,27 +248,13 @@ class MainWindow(QMainWindow):
             act.triggered.connect(handler)
             self.toolbar.addAction(act)
 
-        # Ύψη κολόνων (διάλογος)
-        column_height_action = QAction("Ύψη Κολόνων", self)
-        column_height_action.triggered.connect(self._set_column_heights)
-        self.toolbar.addAction(column_height_action)
-
-        # Επιλογή τύπου/πλέγματος θερμοκηπίου
-        self.grid_selector = QComboBox(self)
-        self.grid_selector.setObjectName("GreenhouseTypeSelector")
-        # Presets: label -> (grid_w_m, grid_h_m)
+        # Presets: label -> (grid_w_m, grid_h_m) (kept for New Project dialog and status mapping)
         self._grid_presets = {
-            "3x5 (5x3 m)": (5.0, 3.0),
-            "5x4 (5x4 m)": (5.0, 4.0),
-            "4x4 (4x4 m)": (4.0, 4.0),
+            "5x3": (5.0, 3.0),
+            "5x4": (5.0, 4.0),
+            "4x4": (4.0, 4.0),
             "Προσαρμοσμένο…": None,
         }
-        for label in self._grid_presets.keys():
-            self.grid_selector.addItem(label)
-        # Set default to 5x3
-        self.grid_selector.setCurrentIndex(0)
-        self.grid_selector.currentTextChanged.connect(self._on_grid_selector_changed)
-        self.toolbar.addWidget(self.grid_selector)
 
         # Διαχείριση Τιμών: ενοποιημένο dropdown (Import, Save, Save As, Reload, Reset)
         self.prices_button = QToolButton(self.toolbar)
@@ -408,6 +410,10 @@ class MainWindow(QMainWindow):
             self._mark_dirty()
         except Exception:
             pass
+        try:
+            self._update_status_labels()
+        except Exception:
+            pass
 
     def _ensure_estimator(self):
         """Create an Estimator once, if available. Returns the instance or None."""
@@ -448,6 +454,10 @@ class MainWindow(QMainWindow):
                 pass
             self._price_source_announced = True
         return self.estimator
+
+    def _toggle_ortho_mode(self, enabled: bool):
+        """Toggle orthogonal (axis-locked) drawing mode."""
+        self.view.ortho_mode = enabled
 
     def _close_perimeter(self):
         self.view.close_perimeter()
@@ -1068,6 +1078,8 @@ class MainWindow(QMainWindow):
 
     def _mark_dirty(self):
         self._dirty = True
+        # New edits reactivate prompting
+        self._suppress_save_prompt = False
         try:
             self._update_window_title()
         except Exception:
@@ -1078,11 +1090,10 @@ class MainWindow(QMainWindow):
         Returns True to proceed (after optional save), False to cancel.
         """
         if not getattr(self, '_dirty', False):
-                # Clear import state
-                self._current_csv_path = None
-                self._csv_applied = False
-                self._last_loaded_codes = set()
-                self._last_loaded_errors = set()
+            return True
+        # If user already chose Don't Save for the current dirty state, don't nag again
+        if getattr(self, '_suppress_save_prompt', False):
+            return True
         m = QMessageBox(self)
         m.setWindowTitle("Μη αποθηκευμένες αλλαγές")
         m.setText("Θέλεις να αποθηκεύσεις τις αλλαγές στη μελέτη;")
@@ -1097,13 +1108,16 @@ class MainWindow(QMainWindow):
             return bool(ok)
         if clicked is cancel_btn:
             return False
+        # Discard: suppress further prompts until new edits happen
+        self._suppress_save_prompt = True
         return True
 
-    def _project_new(self) -> bool:
+    def _project_new(self, from_startup: bool = False) -> bool:
         """Create a new project after asking for name and greenhouse type (grid)."""
-        # Ask to save unsaved changes
-        if not self._maybe_save_before_loss():
-            return False
+        # Ask to save unsaved changes unless invoked from startup dialog
+        if not from_startup:
+            if not self._maybe_save_before_loss():
+                return False
         dlg = NewProjectDialog(self, presets=getattr(self, '_grid_presets', None))
         if dlg.exec() != QDialog.Accepted:
             # If user cancels, keep current state; user can still draw freely.
@@ -1112,10 +1126,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             return False
-        name, type_label, w, h = dlg.get_values()
-        if not name:
-            name = "Μελέτη"
-        self._apply_new_project_name(name)
+        type_label, w, h = dlg.get_values()
+        # Don't set project name yet; the user will pick it on first Save/Save As
+        self._project_name = None
+        self._project_path = None
 
         # Apply chosen grid based on type
         chosen_w, chosen_h = None, None
@@ -1139,31 +1153,28 @@ class MainWindow(QMainWindow):
             self.view.grid_h_m = chosen_h
         except Exception:
             pass
-        # Sync toolbar combobox display without triggering the change dialog again
+        # Remember chosen type label for status display
         try:
-            self.grid_selector.blockSignals(True)
-            # match label if exists, else select custom
-            idx = self.grid_selector.findText(type_label)
-            if idx >= 0:
-                self.grid_selector.setCurrentIndex(idx)
-            else:
-                idx = self.grid_selector.findText("Προσαρμοσμένο…")
-                if idx >= 0:
-                    self.grid_selector.setCurrentIndex(idx)
-            self.grid_selector.blockSignals(False)
+            self._project_type_label = str(type_label) if type_label else None
         except Exception:
-            pass
+            self._project_type_label = None
 
         # Clear drawing and state for new project
         self.view.clear_all()
         self._last_xy = None
         self._dirty = False
+        self._suppress_save_prompt = False
         try:
             self._update_window_title()
+            self._project_type_label = str(type_label) if type_label else None
+            self._update_status_labels()
             self.statusBar().showMessage(
-                f"Νέα μελέτη: {self._project_name} – Πλέγμα {self.view.grid_w_m:g}×{self.view.grid_h_m:g} m",
+                f"Ξεκίνησε νέα μελέτη – Τύπος: {self._project_type_label or '—'}, Πλέγμα {self.view.grid_w_m:g}×{self.view.grid_h_m:g} m",
                 5000,
             )
+            # Ensure the main window is visible and focused
+            self.show()
+            self._focus_main_window()
         except Exception:
             pass
         return True
@@ -1191,9 +1202,11 @@ class MainWindow(QMainWindow):
                 self._project_name = path.stem
             self._project_defined = True
             self._dirty = False
+            self._suppress_save_prompt = False
             try:
                 self._update_window_title()
                 self.statusBar().showMessage(f"Φορτώθηκε: {path.name}", 5000)
+                self._update_status_labels()
             except Exception:
                 pass
             return True
@@ -1210,8 +1223,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self._dirty = False
+            self._suppress_save_prompt = False
             try:
                 self._update_window_title()
+                self._update_status_labels()
             except Exception:
                 pass
             return True
@@ -1239,9 +1254,11 @@ class MainWindow(QMainWindow):
                     pass
             self._project_defined = True
             self._dirty = False
+            self._suppress_save_prompt = False
             try:
                 self._update_window_title()
                 self.statusBar().showMessage(f"Αποθηκεύτηκε: {path.name}", 5000)
+                self._update_status_labels()
             except Exception:
                 pass
             return True
@@ -1289,6 +1306,8 @@ class MainWindow(QMainWindow):
             "geometry": {
                 "points": pts,
                 "guides": guides,
+                "breaks": list(getattr(self.view.state, 'breaks', []) or []),
+                "start_new_chain_pending": bool(getattr(self.view.state, 'start_new_chain_pending', False)),
             },
             "columns": {
                 "large": float(self.large_column_height or 0.0),
@@ -1322,9 +1341,16 @@ class MainWindow(QMainWindow):
             geom = (data or {}).get("geometry", {})
             pts = geom.get("points", []) or []
             guides = geom.get("guides", []) or []
+            breaks = geom.get("breaks", []) or []
+            start_pending = bool(geom.get("start_new_chain_pending", False))
             # Apply to view state
             self.view.state.points = [QPointF(float(x), float(y)) for (x, y) in pts]
             self.view.state.guides = [(QPointF(float(sx), float(sy)), QPointF(float(ex), float(ey))) for ((sx, sy), (ex, ey)) in guides]
+            try:
+                self.view.state.breaks = [int(i) for i in (breaks or [])]
+            except Exception:
+                self.view.state.breaks = []
+            self.view.state.start_new_chain_pending = start_pending
             self.view.state.save_state()
             self.view.perimeter_manager.refresh_perimeter()
             self.view._refresh_guides()
@@ -1386,10 +1412,81 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία εφαρμογής μελέτης: {e}")
             return False
+    
+    def _preset_label_for_grid(self, w: float, h: float) -> str | None:
+        try:
+            for lbl, dims in (self._grid_presets or {}).items():
+                if not dims:
+                    continue
+                gw, gh = dims
+                if abs(float(gw) - float(w)) < 1e-6 and abs(float(gh) - float(h)) < 1e-6:
+                    return lbl
+        except Exception:
+            pass
+        return None
+
+    def _update_status_labels(self):
+        """Update permanent status bar labels: project name, type, grid."""
+        try:
+            name = self._project_name or "(χωρίς όνομα)"
+            self.status_project_label.setText(f"Μελέτη: {name}")
+        except Exception:
+            pass
+        try:
+            # Prefer remembered label; else try to infer from grid dims
+            lbl = self._project_type_label or self._preset_label_for_grid(getattr(self.view, 'grid_w_m', 5.0), getattr(self.view, 'grid_h_m', 3.0))
+            self.status_type_label.setText(f"Τύπος: {lbl}" if lbl else "Τύπος: —")
+        except Exception:
+            pass
+        try:
+            self.status_grid_label.setText(f"Πλέγμα: {getattr(self.view, 'grid_w_m', 5.0):g}×{getattr(self.view, 'grid_h_m', 3.0):g} m")
+        except Exception:
+            pass
 
     # ---------------------------
     # Startup & Autosave helpers
     # ---------------------------
+    def _focus_main_window(self):
+        """Bring the main window to the foreground after modal dialogs."""
+        try:
+            if self.isMinimized():
+                self.showNormal()
+        except Exception:
+            pass
+        try:
+            self.raise_()
+        except Exception:
+            pass
+        try:
+            self.activateWindow()
+        except Exception:
+            pass
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, "_startup_prompt_scheduled", False):
+            self._startup_prompt_scheduled = True
+            try:
+                QTimer.singleShot(0, self._run_startup_prompt_sequence)
+            except Exception:
+                # Fallback: run synchronously if timer fails
+                self._run_startup_prompt_sequence()
+
+    def _run_startup_prompt_sequence(self):
+        # Ensure the main window is visible before prompting
+        try:
+            self._focus_main_window()
+        except Exception:
+            pass
+
+        try:
+            self._startup_project_prompt()
+        finally:
+            try:
+                self._start_autosave_timer()
+            except Exception:
+                pass
+
     def _projects_dir_path(self) -> Path:
         try:
             root = Path(__file__).resolve().parent.parent
@@ -1442,6 +1539,7 @@ class MainWindow(QMainWindow):
                                 self.statusBar().showMessage("Συνέχεια από αυτόματη αποθήκευση.", 4000)
                             except Exception:
                                 pass
+                            self._focus_main_window()
                             return
                     except Exception:
                         pass
@@ -1452,14 +1550,17 @@ class MainWindow(QMainWindow):
                     except Exception:
                         ok = False
                     if ok:
+                        self._focus_main_window()
                         return
                     # else: loop again to show choices
                     continue
-                # New project
-                if self._project_new():
+                # New project (from startup)
+                if self._project_new(from_startup=True):
+                    self._focus_main_window()
                     return
                 else:
                     # user canceled new; allow drawing and exit prompt
+                    self._focus_main_window()
                     return
             else:
                 m = QMessageBox(self)
@@ -1476,22 +1577,26 @@ class MainWindow(QMainWindow):
                     except Exception:
                         ok = False
                     if ok:
+                        self._focus_main_window()
                         return
                     # try again once
                     continue
-                if self._project_new():
+                if self._project_new(from_startup=True):
+                    self._focus_main_window()
                     return
                 else:
+                    self._focus_main_window()
                     return
 
     def closeEvent(self, event):
-        try:
-            proceed = self._maybe_save_before_loss()
-            if not proceed:
-                event.ignore()
-                return
-        except Exception:
-            pass
+        # Temporarily disabled save prompt on close
+        # try:
+        #     proceed = self._maybe_save_before_loss()
+        #     if not proceed:
+        #         event.ignore()
+        #         return
+        # except Exception:
+        #     pass
         return super().closeEvent(event)
 
     def _start_autosave_timer(self, interval_ms: int = 30000):
@@ -1514,7 +1619,7 @@ class MainWindow(QMainWindow):
             has_content = bool(self.view.state.points or self.view.state.guides)
         except Exception:
             has_content = False
-        if not (self._project_defined or has_content):
+        if not has_content:
             return
         try:
             data = self._project_to_dict()

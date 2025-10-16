@@ -11,6 +11,11 @@ class DrawingState:
         # Drawing state
         self.points: List[QPointF] = []
         self.guides: List[Tuple[QPointF, QPointF]] = []
+        # Indices in points after which a break exists (no segment between i and i+1)
+        # Example: if 3 is in breaks, there is no edge between points[3] and points[4]
+        self.breaks: List[int] = []
+        # If True, the next click in polyline mode starts a new chain (separate subpath)
+        self.start_new_chain_pending: bool = False
         self.perimeter_locked = False
         
         # Mode flags
@@ -41,6 +46,8 @@ class DrawingState:
         state = {
             "points": list(self.points),
             "guides": list(self.guides),
+            "breaks": list(self.breaks),
+            "start_new_chain_pending": bool(self.start_new_chain_pending),
         }
         self.history.append(state)
         self.future.clear()
@@ -49,6 +56,8 @@ class DrawingState:
         """Restore state from history."""
         self.points = list(state["points"])
         self.guides = list(state["guides"])
+        self.breaks = list(state.get("breaks", []))
+        self.start_new_chain_pending = bool(state.get("start_new_chain_pending", False))
     
     def can_undo(self) -> bool:
         return len(self.history) >= 2
@@ -75,6 +84,8 @@ class DrawingState:
         """Clear all drawing state."""
         self.points.clear()
         self.guides.clear()
+        self.breaks.clear()
+        self.start_new_chain_pending = False
         self.perimeter_locked = False
         self._guide_start = None
         self._dim_input = ""

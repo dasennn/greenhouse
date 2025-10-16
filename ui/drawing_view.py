@@ -36,6 +36,7 @@ class DrawingView(QGraphicsView):
     """Main drawing view for greenhouse design."""
     
     perimeter_closed = Signal(list, float, float, list)
+    geometry_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -60,6 +61,9 @@ class DrawingView(QGraphicsView):
         self.grid_w_m = 5.0
         self.grid_h_m = 3.0
         self.greenhouse_type = "3x5_with_sides"
+        
+        # Ortho mode (axis-locked drawing)
+        self.ortho_mode = False
 
         # Initialize managers
         self.perimeter_manager = PerimeterManager(self.scene, self.state, self.scale_factor, view=self)
@@ -76,8 +80,11 @@ class DrawingView(QGraphicsView):
         self.scene.addItem(self.snap_marker)
         self.snap_marker.hide()
 
+        self.preview_polyline_pen = QPen(QColor("green"), 1, Qt.DashLine)
+        self.preview_guide_pen = QPen(QColor("#d32f2f"), 1, Qt.DashLine)
+
         self.preview_line = QGraphicsLineItem()
-        self.preview_line.setPen(QPen(QColor("green"), 1, Qt.DashLine))
+        self.preview_line.setPen(self.preview_polyline_pen)
         self.preview_line.setZValue(1.5)
         self.scene.addItem(self.preview_line)
         self.preview_line.hide()
@@ -88,12 +95,193 @@ class DrawingView(QGraphicsView):
         self.preview_label.hide()
 
     def close_perimeter(self):
+        """Close the perimeter by reconstructing the drawn polyline graph-style (AutoCAD-like)."""
         if len(self.state.points) < 3:
-            QMessageBox.information(self, "Κλείσιμο Περιμέτρου", "Χρειάζονται τουλάχιστον 3 σημεία για να κλείσει η περίμετρος.")
+            QMessageBox.information(
+                self,
+                "Κλείσιμο Περιμέτρου",
+                "Χρειάζονται τουλάχιστον 3 σημεία για να κλείσει η περίμετρος."
+            )
             return
-        if self.state.points[0] != self.state.points[-1]:
-            self.state.save_state()
-            self.state.points.append(self.state.points[0])
+
+        self.state.save_state()
+
+        tol = 0.5  # pixels tolerance for merging snapped points
+        breaks = set(getattr(self.state, "breaks", []) or [])
+
+        # Map every point to a merged vertex (union of coincident points)
+        merged_vertices: list[QPointF] = []
+        vertex_index_map: list[int] = []
+        for pt in self.state.points:
+            idx = None
+            for vidx, vpt in enumerate(merged_vertices):
+                if math.hypot(pt.x() - vpt.x(), pt.y() - vpt.y()) <= tol:
+                    idx = vidx
+                    break
+            if idx is None:
+                merged_vertices.append(QPointF(pt))
+                vertex_index_map.append(len(merged_vertices) - 1)
+            else:
+                vertex_index_map.append(idx)
+
+        if len(merged_vertices) < 2:
+            QMessageBox.information(
+                self,
+                "Κλείσιμο Περιμέτρου",
+                "Δεν υπάρχουν αρκετές συνδέσεις για κλείσιμο."
+            )
+            return
+
+        # Build adjacency based on sequential segments (respecting breaks)
+        adjacency: list[set[int]] = [set() for _ in merged_vertices]
+        for i in range(len(self.state.points) - 1):
+            if i in breaks:
+                continue
+            a = vertex_index_map[i]
+            b = vertex_index_map[i + 1]
+            if a == b:
+                continue
+            adjacency[a].add(b)
+            adjacency[b].add(a)
+
+        # Consider only vertices participating in edges
+        active_vertices = {idx for idx, nbrs in enumerate(adjacency) if nbrs}
+        if not active_vertices:
+            QMessageBox.information(
+                self,
+                "Κλείσιμο Περιμέτρου",
+                "Δεν βρέθηκαν συνδεδεμένες γραμμές για κλείσιμο."
+            )
+            return
+
+        # Ensure everything is in a single connected component
+        start_vertex = next(iter(active_vertices))
+        component: set[int] = set()
+        stack = [start_vertex]
+        while stack:
+            v = stack.pop()
+            if v in component:
+                continue
+            component.add(v)
+            for nbr in adjacency[v]:
+                if nbr in active_vertices:
+                    stack.append(nbr)
+
+        if component != active_vertices:
+            dangling = active_vertices - component
+            QMessageBox.information(
+                self,
+                "Κλείσιμο Περιμέτρου",
+                "Υπάρχουν τμήματα που δεν είναι συνδεδεμένα μεταξύ τους. Συνδέστε τα πρώτα με snap."
+            )
+            return
+
+        degrees = {idx: len(adjacency[idx]) for idx in component}
+        branch_vertices = [idx for idx, deg in degrees.items() if deg > 2]
+        if branch_vertices:
+            QMessageBox.information(
+                self,
+                "Κλείσιμο Περιμέτρου",
+                "Υπάρχουν διακλαδώσεις (κόμβοι με πάνω από 2 συνδέσεις). Η τρέχουσα έκδοση υποστηρίζει μόνο polylines χωρίς κλαδιά."
+            )
+            return
+
+        endpoints = [idx for idx, deg in degrees.items() if deg == 1]
+        if len(endpoints) not in (0, 2):
+            QMessageBox.information(
+                self,
+                "Κλείσιμο Περιμέτρου",
+                f"Βρέθηκαν {len(endpoints)} ελεύθερα άκρα. Συνδέστε τα πρώτα ώστε να παραμείνουν 0 ή 2."
+            )
+            return
+
+        # Helper to linearise the component (path or cycle)
+        def build_order(start_idx: int, end_idx: int | None) -> list[int] | None:
+            ordered: list[int] = [start_idx]
+            prev = None
+            current = start_idx
+            visited_edges: set[tuple[int, int]] = set()
+
+            while True:
+                if end_idx is not None and current == end_idx:
+                    break
+
+                neighbours = adjacency[current].copy()
+                if prev is not None:
+                    neighbours.discard(prev)
+
+                if not neighbours:
+                    if end_idx is None:
+                        break
+                    # Dead-end before reaching target
+                    return None
+
+                if len(neighbours) > 1:
+                    # Branching inside supposed polyline
+                    return None
+
+                nxt = neighbours.pop()
+                edge = (current, nxt)
+                if edge in visited_edges:
+                    break
+                visited_edges.add(edge)
+                visited_edges.add((nxt, current))
+
+                ordered.append(nxt)
+                prev = current
+                current = nxt
+
+                if end_idx is None and current == start_idx:
+                    break
+
+            return ordered
+
+        if len(endpoints) == 0:
+            # Closed loop already; traverse once around the cycle
+            node_order = build_order(start_vertex, None)
+            if not node_order or len(set(node_order)) != len(component):
+                QMessageBox.information(
+                    self,
+                    "Κλείσιμο Περιμέτρου",
+                    "Αδυναμία ανασύνθεσης της κλειστής γραμμής. Ελέγξτε για διακλαδώσεις."
+                )
+                return
+            if node_order[-1] == node_order[0]:
+                node_order = node_order[:-1]
+        else:
+            node_order = build_order(endpoints[0], endpoints[1])
+            if not node_order or node_order[-1] != endpoints[1]:
+                QMessageBox.information(
+                    self,
+                    "Κλείσιμο Περιμέτρου",
+                    "Δεν βρέθηκε μονοπάτι που να ενώνει τα δύο ελεύθερα άκρα."
+                )
+                return
+            if set(node_order) != component:
+                QMessageBox.information(
+                    self,
+                    "Κλείσιμο Περιμέτρου",
+                    "Ορισμένα τμήματα δεν συμπεριλήφθηκαν στο τελικό πολύγωνο. Συνδέστε τα σε μία συνεχόμενη γραμμή."
+                )
+                return
+
+        # Rebuild ordered perimeter points
+        ordered_points = [QPointF(merged_vertices[idx]) for idx in node_order]
+        if len(ordered_points) < 3:
+            QMessageBox.information(
+                self,
+                "Κλείσιμο Περιμέτρου",
+                "Το σχήμα χρειάζεται τουλάχιστον 3 μη ομοιόμορφα σημεία."
+            )
+            return
+
+        self.state.points = ordered_points
+        self.state.breaks.clear()
+        self.state.start_new_chain_pending = False
+
+        # Append starting point to close the loop explicitly
+        self.state.points.append(QPointF(self.state.points[0]))
+
         self.perimeter_manager.refresh_perimeter()
 
         # compute perimeter and area
@@ -209,12 +397,10 @@ class DrawingView(QGraphicsView):
         self.toggle_pointer_mode(True)
         self.perimeter_closed.emit(list(self.state.points), perimeter_m, area_m2, partial_details)
 
-    def _commit_dimensional_segment(self, length_m: float, alt_held: bool, free_mode: bool):
+    def _commit_dimensional_segment(self, length_m: float, alt_held: bool):
         """
         Commit a segment with exact length in meters.
-        Direction is determined by current mouse vector from the reference point:
-          - If free_mode is False (default), lock to horizontal/vertical based on larger delta.
-          - If free_mode is True (Shift held), follow the mouse direction freely.
+        Direction respects ortho_mode setting.
         """
         if not self.state.points:
             return
@@ -224,8 +410,8 @@ class DrawingView(QGraphicsView):
         dx = self.state.last_mouse_scene.x() - ref.x()
         dy = self.state.last_mouse_scene.y() - ref.y()
 
-        if not free_mode:
-            # Axis lock: choose axis with larger magnitude
+        if self.ortho_mode:
+            # Axis-locked: choose axis with larger magnitude
             if abs(dx) >= abs(dy):
                 # Horizontal
                 ux, uy = (1.0 if dx >= 0 else -1.0), 0.0
@@ -233,7 +419,7 @@ class DrawingView(QGraphicsView):
                 # Vertical
                 ux, uy = 0.0, (1.0 if dy >= 0 else -1.0)
         else:
-            # Free: use actual mouse direction; fall back to +X if zero length
+            # Free mode: use actual mouse direction; fall back to +X if zero length
             mag = math.hypot(dx, dy)
             if mag == 0:
                 ux, uy = 1.0, 0.0
@@ -255,27 +441,39 @@ class DrawingView(QGraphicsView):
         self.preview_line.hide()
         self.preview_label.hide()
         self.perimeter_manager.refresh_perimeter()
+        try:
+            self.geometry_changed.emit()
+        except Exception:
+            pass
 
     def _commit_dimensional_guide(self, length_m: float):
         """
         Commit a guide line with an exact length in meters from the current guide start.
-        Direction is axis-locked (horizontal/vertical) and chosen based on the current
-        mouse vector from the start point.
+        Direction respects ortho_mode setting.
         """
         if self.state._guide_start is None:
             return
 
         s = self.state._guide_start
-        # Use current mouse to pick the axis and direction
+        # Use current mouse to determine direction
         dx = self.state.last_mouse_scene.x() - s.x()
         dy = self.state.last_mouse_scene.y() - s.y()
 
-        if abs(dx) >= abs(dy):
-            # Horizontal guide
-            ux, uy = (1.0 if dx >= 0 else -1.0), 0.0
+        if self.ortho_mode:
+            # Axis-locked: choose H or V
+            if abs(dx) >= abs(dy):
+                # Horizontal guide
+                ux, uy = (1.0 if dx >= 0 else -1.0), 0.0
+            else:
+                # Vertical guide
+                ux, uy = 0.0, (1.0 if dy >= 0 else -1.0)
         else:
-            # Vertical guide
-            ux, uy = 0.0, (1.0 if dy >= 0 else -1.0)
+            # Free: use actual direction
+            mag = math.hypot(dx, dy)
+            if mag == 0:
+                ux, uy = 1.0, 0.0
+            else:
+                ux, uy = dx / mag, dy / mag
 
         L = length_m * self.scale_factor
         e = QPointF(s.x() + ux * L, s.y() + uy * L)
@@ -286,11 +484,17 @@ class DrawingView(QGraphicsView):
         self._refresh_guides()
         self.preview_line.hide()
         self.preview_label.hide()
+        try:
+            self.geometry_changed.emit()
+        except Exception:
+            pass
     def save_state(self):
         # Save a deep copy of BOTH perimeter and guide state
         state = {
             "points": list(self.state.points),
             "guides": list(self.state.guides),
+            "breaks": list(getattr(self.state, 'breaks', []) or []),
+            "start_new_chain_pending": bool(getattr(self.state, 'start_new_chain_pending', False)),
         }
         self.state.history.append(state)
         self.state.future.clear()
@@ -298,6 +502,8 @@ class DrawingView(QGraphicsView):
     def restore_state(self, state):
         self.state.points = list(state["points"])
         self.state.guides = list(state["guides"])
+        self.state.breaks = list(state.get("breaks", []))
+        self.state.start_new_chain_pending = bool(state.get("start_new_chain_pending", False))
         self.perimeter_manager.refresh_perimeter()
         self._refresh_guides()
 
@@ -318,6 +524,10 @@ class DrawingView(QGraphicsView):
         self.state.history.append(state)
         # Likewise, restore via the view so the scene is updated immediately.
         self.restore_state(state)
+        try:
+            self.geometry_changed.emit()
+        except Exception:
+            pass
 
     def drawBackground(self, painter: QPainter, rect: QRectF):
         """Draw background grid using DrawingRenderer."""
@@ -366,7 +576,6 @@ class DrawingView(QGraphicsView):
 
             if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
                 rect = self.scene.sceneRect()
-
             # Reset any previous scaling then fit
             self.resetTransform()
             self.fitInView(rect, Qt.KeepAspectRatio)
@@ -381,11 +590,6 @@ class DrawingView(QGraphicsView):
                 self.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
             except Exception:
                 pass
-
-    def toggle_osnap_mode(self, on: bool):
-        self.state.osnap_enabled = on
-        color = "yellow" if on else "red"
-        self.snap_marker.setPen(QPen(QColor(color), 2))
 
     def toggle_pointer_mode(self, on: bool):
         self.state.pointer_enabled = on
@@ -450,40 +654,49 @@ class DrawingView(QGraphicsView):
         grid_x = self.grid_w_m * self.scale_factor
         grid_y = self.grid_h_m * self.scale_factor
 
-        # Nearest grid intersection
+        # PRIORITY 1: Check perimeter vertices (HIGHEST priority for connections)
+        closest_vertex_dist = float('inf')
+        closest_vertex_pt = None
+        closest_vertex_idx = None
+        for idx, pt in enumerate(self.state.points):
+            vp = self.mapFromScene(pt)
+            d = (vp.x() - view_p.x()) ** 2 + (vp.y() - view_p.y()) ** 2
+            if d < closest_vertex_dist:
+                closest_vertex_dist = d
+                closest_vertex_pt = pt
+                closest_vertex_idx = idx
+
+        # If vertex is close enough, ALWAYS prefer it (ignore grid)
+        if closest_vertex_pt is not None and closest_vertex_dist <= snap_tol_px ** 2:
+            return closest_vertex_pt, "vertex", closest_vertex_idx
+
+        # PRIORITY 2: Check guide endpoints
+        closest_guide_dist = float('inf')
+        closest_guide_pt = None
+        for s, e in getattr(self.state, 'guides', []) or []:
+            for gpt in (s, e):
+                vp = self.mapFromScene(gpt)
+                d = (vp.x() - view_p.x()) ** 2 + (vp.y() - view_p.y()) ** 2
+                if d < closest_guide_dist:
+                    closest_guide_dist = d
+                    closest_guide_pt = gpt
+
+        # If guide endpoint is close enough, prefer it over grid
+        if closest_guide_pt is not None and closest_guide_dist <= snap_tol_px ** 2:
+            return closest_guide_pt, "guide", None
+
+        # PRIORITY 3: Grid intersection (fallback)
         gx = round(scene_p.x() / grid_x) * grid_x
         gy = round(scene_p.y() / grid_y) * grid_y
         grid_pt = QPointF(gx, gy)
         grid_vp = self.mapFromScene(grid_pt)
         dist_grid = (grid_vp.x() - view_p.x()) ** 2 + (grid_vp.y() - view_p.y()) ** 2
-
-        # Midpoint on vertical grid line (halfway in y, x on grid)
-        mx_v = gx
-        my_v = (round(scene_p.y() / grid_y - 0.5) + 0.5) * grid_y
-        vert_mid_pt = QPointF(mx_v, my_v)
-        vert_mid_vp = self.mapFromScene(vert_mid_pt)
-        dist_vert_mid = (vert_mid_vp.x() - view_p.x()) ** 2 + (vert_mid_vp.y() - view_p.y()) ** 2
-
-        # Midpoint on horizontal grid line (halfway in x, y on grid)
-        mx_h = (round(scene_p.x() / grid_x - 0.5) + 0.5) * grid_x
-        my_h = gy
-        horiz_mid_pt = QPointF(mx_h, my_h)
-        horiz_mid_vp = self.mapFromScene(horiz_mid_pt)
-        dist_horiz_mid = (horiz_mid_vp.x() - view_p.x()) ** 2 + (horiz_mid_vp.y() - view_p.y()) ** 2
-
-        # Find closest candidate
-        min_dist = min(dist_grid, dist_vert_mid, dist_horiz_mid)
-        if min_dist <= snap_tol_px ** 2:
-            if min_dist == dist_grid:
-                return grid_pt, "grid"
-            else:
-                # "mid" for both edge cases, both will show blue
-                if min_dist == dist_vert_mid:
-                    return vert_mid_pt, "mid"
-                else:
-                    return horiz_mid_pt, "mid"
-        else:
-            return scene_p, None
+        
+        if dist_grid <= snap_tol_px ** 2:
+            return grid_pt, "grid", None
+        
+        # No snap - return original point
+        return scene_p, None, None
 
     def mousePressEvent(self, event):
         # Allow drawing even without a named project; startup dialog still offers choices.
@@ -519,27 +732,27 @@ class DrawingView(QGraphicsView):
 
         view_p = event.pos()
         scene_p = self.mapToScene(view_p)
-        snap_pt, snap_type = self.snap_to_greenhouse_grid_or_edge_mid_if_close(scene_p, view_p)
+        snap_pt, snap_type, _ = self.snap_to_greenhouse_grid_or_edge_mid_if_close(scene_p, view_p)
 
-        grid_x = self.grid_w_m * self.scale_factor
-        grid_y = self.grid_h_m * self.scale_factor
-        nearest_grid = QPointF(
-            round(scene_p.x() / grid_x) * grid_x,
-            round(scene_p.y() / grid_y) * grid_y
-        )
-
+        # Color-code snap markers
         if snap_type == "grid":
-            marker_pt = snap_pt
             color = "red"
-        elif snap_type == "mid":
-            marker_pt = snap_pt
-            color = "blue"
+        elif snap_type == "vertex":
+            color = "cyan"  # Perimeter vertex
+        elif snap_type == "guide":
+            color = "magenta"  # Guide endpoint
         else:
-            marker_pt = nearest_grid
+            # No snap; fallback to nearest grid for marker position
+            grid_x = self.grid_w_m * self.scale_factor
+            grid_y = self.grid_h_m * self.scale_factor
+            snap_pt = QPointF(
+                round(scene_p.x() / grid_x) * grid_x,
+                round(scene_p.y() / grid_y) * grid_y
+            )
             color = "gray"
 
         self.snap_marker.setPen(QPen(QColor(color), 3))
-        self.snap_marker.setRect(marker_pt.x() - 7, marker_pt.y() - 7, 14, 14)
+        self.snap_marker.setRect(snap_pt.x() - 7, snap_pt.y() - 7, 14, 14)
         # If pointer mode is active, hide the snap marker entirely
         if self.state.pointer_enabled:
             self.snap_marker.hide()
@@ -562,40 +775,58 @@ class DrawingView(QGraphicsView):
                         return
             return super().mousePressEvent(event)
 
-        # Guide-line mode
+        # Guide-line mode: respect ortho_mode flag
         if self.state.guide_enabled and event.button() == Qt.LeftButton:
             if self.state._guide_start is None:
                 self.state._guide_start = snap_pt
             else:
                 s, e = self.state._guide_start, snap_pt
-                if abs(e.y() - s.y()) > abs(e.x() - s.x()):
-                    e = QPointF(s.x(), e.y())
-                else:
-                    e = QPointF(e.x(), s.y())
+                if self.ortho_mode:
+                    # Axis-locked: choose H or V
+                    if abs(e.y() - s.y()) > abs(e.x() - s.x()):
+                        e = QPointF(s.x(), e.y())
+                    else:
+                        e = QPointF(e.x(), s.y())
                 self.state.guides.append((s, e))
                 self.state.save_state()
                 self.state._guide_start = None
                 self._refresh_guides()
+                self.preview_line.hide()
+                self.preview_label.hide()
             return
 
-        # Polyline mode: axis‐locked by default, free‐angle with Shift
+        # Polyline mode: respect ortho_mode flag
         if self.state.polyline_enabled and event.button() == Qt.LeftButton:
-            self.state.free_mode = bool(event.modifiers() & Qt.ShiftModifier)
             raw_pt = snap_pt
             alt_held = bool(event.modifiers() & Qt.AltModifier)
 
-            if not self.state.points:
+            # Check if snapped to an existing vertex (connection point)
+            snapped_to_vertex = (snap_type == "vertex")
+            
+            if not self.state.points or getattr(self.state, 'start_new_chain_pending', False):
+                # Start a new chain
+                if getattr(self.state, 'start_new_chain_pending', False) and self.state.points:
+                    # Record a break between previous last and the new first
+                    try:
+                        self.state.breaks.append(len(self.state.points) - 1)
+                    except Exception:
+                        pass
+                self.state.start_new_chain_pending = False
+                # First point of new chain is placed as-is
                 self.state.points.append(raw_pt)
                 self.state.save_state()
             else:
+                # Check ortho mode
                 ref = self.state.points[0] if alt_held else self.state.points[-1]
-                if not self.state.free_mode:
+                if self.ortho_mode:
+                    # Axis-locked: choose H or V based on larger delta
                     dx, dy = raw_pt.x() - ref.x(), raw_pt.y() - ref.y()
                     if abs(dx) > abs(dy):
                         new_pt = QPointF(raw_pt.x(), ref.y())
                     else:
                         new_pt = QPointF(ref.x(), raw_pt.y())
                 else:
+                    # Free mode
                     new_pt = raw_pt
 
                 if alt_held:
@@ -603,6 +834,11 @@ class DrawingView(QGraphicsView):
                 else:
                     self.state.points.append(new_pt)
                 self.state.save_state()
+                
+                # If we snapped to an existing vertex, end this chain automatically
+                # (user is connecting to existing geometry)
+                if snapped_to_vertex:
+                    self.state.start_new_chain_pending = True
 
             self.preview_line.hide()
             self.preview_label.hide()
@@ -625,52 +861,52 @@ class DrawingView(QGraphicsView):
         view_p = event.pos()
         scene_p = self.mapToScene(view_p)
         self.state.last_mouse_scene = scene_p
-        snap_pt, snap_type = self.snap_to_greenhouse_grid_or_edge_mid_if_close(scene_p, view_p)
+        snap_pt, snap_type, _ = self.snap_to_greenhouse_grid_or_edge_mid_if_close(scene_p, view_p)
 
-        grid_x = self.grid_w_m * self.scale_factor
-        grid_y = self.grid_h_m * self.scale_factor
-        nearest_grid = QPointF(
-            round(scene_p.x() / grid_x) * grid_x,
-            round(scene_p.y() / grid_y) * grid_y
-        )
-
+        # Color-code snap markers for mouse move
         if snap_type == "grid":
-            marker_pt = snap_pt
             color = "red"
-        elif snap_type == "mid":
-            marker_pt = snap_pt
-            color = "blue"
+        elif snap_type == "vertex":
+            color = "cyan"
+        elif snap_type == "guide":
+            color = "magenta"
         else:
-            marker_pt = nearest_grid
+            grid_x = self.grid_w_m * self.scale_factor
+            grid_y = self.grid_h_m * self.scale_factor
+            snap_pt = QPointF(
+                round(scene_p.x() / grid_x) * grid_x,
+                round(scene_p.y() / grid_y) * grid_y
+            )
             color = "gray"
 
         self.snap_marker.setPen(QPen(QColor(color), 3))
-        self.snap_marker.setRect(marker_pt.x() - 7, marker_pt.y() - 7, 14, 14)
-        if not (self.state.pointer_enabled and snap_type in ("grid", "mid")):
+        self.snap_marker.setRect(snap_pt.x() - 7, snap_pt.y() - 7, 14, 14)
+        if not (self.state.pointer_enabled and snap_type in ("grid", "vertex", "guide")):
             self.snap_marker.show()
         else:
             self.snap_marker.hide()
 
 
-        # Polyline preview (free, always follows mouse)
-        if self.state.polyline_enabled and self.state.points:
-            self.state.free_mode = bool(event.modifiers() & Qt.ShiftModifier)
+        preview_active = False
+
+        # Polyline preview: respect ortho_mode
+        if self.state.polyline_enabled and self.state.points and not getattr(self.state, 'start_new_chain_pending', False):
             alt_held = bool(event.modifiers() & Qt.AltModifier)
             ref = self.state.points[0] if alt_held else self.state.points[-1]
-            neighbor = (self.state.points[1] if alt_held and len(self.state.points) > 1
-                        else self.state.points[-2] if not alt_held and len(self.state.points) > 1
-                        else None)
-            snap_pt = scene_p  # Use free mouse position for preview
 
-            if neighbor and not self.state.free_mode:
-                dx, dy = snap_pt.x() - ref.x(), snap_pt.y() - ref.y()
+            if self.ortho_mode:
+                # Axis-locked preview
+                dx, dy = scene_p.x() - ref.x(), scene_p.y() - ref.y()
                 if abs(dx) > abs(dy):
-                    target = QPointF(snap_pt.x(), ref.y())
+                    target = QPointF(scene_p.x(), ref.y())
                 else:
-                    target = QPointF(ref.x(), snap_pt.y())
+                    target = QPointF(ref.x(), scene_p.y())
             else:
-                target = snap_pt
+                # Free preview
+                target = scene_p
 
+            self.preview_line.setPen(self.preview_polyline_pen)
+            self.preview_label.setDefaultTextColor(self.preview_polyline_pen.color())
             self.preview_line.setLine(ref.x(), ref.y(), target.x(), target.y())
             dist = math.hypot(target.x() - ref.x(), target.y() - ref.y()) / self.scale_factor
             mid = QPointF((ref.x() + target.x()) / 2, (ref.y() + target.y()) / 2)
@@ -678,7 +914,33 @@ class DrawingView(QGraphicsView):
             self.preview_label.setPos(mid)
             self.preview_line.show()
             self.preview_label.show()
-        else:
+            preview_active = True
+
+        # Guide preview when drawing helper lines
+        if (not preview_active and self.state.guide_enabled and 
+                self.state._guide_start is not None):
+            s = self.state._guide_start
+            target = snap_pt
+            if self.ortho_mode:
+                dx = target.x() - s.x()
+                dy = target.y() - s.y()
+                if abs(dy) > abs(dx):
+                    target = QPointF(s.x(), target.y())
+                else:
+                    target = QPointF(target.x(), s.y())
+
+            self.preview_line.setPen(self.preview_guide_pen)
+            self.preview_label.setDefaultTextColor(self.preview_guide_pen.color())
+            self.preview_line.setLine(s.x(), s.y(), target.x(), target.y())
+            dist = math.hypot(target.x() - s.x(), target.y() - s.y()) / self.scale_factor
+            mid = QPointF((s.x() + target.x()) / 2, (s.y() + target.y()) / 2)
+            self.preview_label.setPlainText(GeometryHelper.format_measure(dist))
+            self.preview_label.setPos(mid)
+            self.preview_line.show()
+            self.preview_label.show()
+            preview_active = True
+
+        if not preview_active:
             self.preview_line.hide()
             self.preview_label.hide()
 
@@ -704,7 +966,13 @@ class DrawingView(QGraphicsView):
 
     def keyPressEvent(self, event):
         # Allow keyboard-driven creation even without a named project.
-        if event.key() == Qt.Key_Escape and (self.state.polyline_enabled or self.state.guide_enabled or self.state.pan_enabled):
+        if event.key() == Qt.Key_Escape:
+            # If user is typing a dimension, cancel buffer but keep current mode
+            if self.state._dim_input:
+                self.state._dim_input = ""
+                self.preview_label.hide()
+                return
+            # ESC always returns to Pointer mode (Δείκτης)
             self.toggle_pointer_mode(True)
             parent = self.parent()
             if isinstance(parent, QMainWindow):
@@ -760,31 +1028,32 @@ class DrawingView(QGraphicsView):
 
             # Commit on Enter / Return
             if key in (Qt.Key_Return, Qt.Key_Enter):
-                # If buffer is empty, prompt for length
-                if not self.state._dim_input:
-                    # Prompt user for length (meters)
-                    val, ok = QInputDialog.getDouble(
-                        self, "Μήκος Τμήματος", "Εισάγετε μήκος τμήματος (μέτρα):", 1.0, 0.01, 1000.0, 2
-                    )
-                    if not ok:
-                        # Cancelled dialog
-                        self.state._dim_input = ""
-                        self.preview_label.hide()
-                        return
-                    length_m = val
-                else:
+                if self.state._dim_input:
+                    # Dimensional segment commit (always free mode now)
                     try:
                         length_m = float(self.state._dim_input)
                     except ValueError:
                         self.state._dim_input = ""
                         self.preview_label.hide()
                         return
-                alt_held = bool(event.modifiers() & Qt.AltModifier)
-                free_mode = bool(event.modifiers() & Qt.ShiftModifier)
-                self._commit_dimensional_segment(length_m, alt_held, free_mode)
-                self.state._dim_input = ""
-                self.preview_label.hide()
-                return
+                    alt_held = bool(event.modifiers() & Qt.AltModifier)
+                    self._commit_dimensional_segment(length_m, alt_held)
+                    self.state._dim_input = ""
+                    self.preview_label.hide()
+                    return
+                else:
+                    # No dimensional input: end current small shape and start a new chain
+                    if self.state.points:
+                        self.state.save_state()
+                        self.state.start_new_chain_pending = True
+                        # Visual reset of preview of current segment
+                        self.preview_line.hide()
+                        self.preview_label.hide()
+                        try:
+                            self.geometry_changed.emit()
+                        except Exception:
+                            pass
+                    return
 
         # Dimensional input (guide mode): Only commit on Enter/Return
         if self.state.guide_enabled:
@@ -1009,10 +1278,19 @@ class DrawingView(QGraphicsView):
         self.guide_labels.clear()
         self.state.guides.clear()
         self._refresh_guides()
+        try:
+            self.geometry_changed.emit()
+        except Exception:
+            pass
 
     def clear_all(self):
         self.state.points.clear()
         self.state.guides.clear()
+        try:
+            self.state.breaks.clear()
+            self.state.start_new_chain_pending = False
+        except Exception:
+            pass
         self.state.save_state()
         self.perimeter_manager.refresh_perimeter()
         self._refresh_guides()
@@ -1031,12 +1309,20 @@ class DrawingView(QGraphicsView):
             ptr_act = parent.findChild(QAction, "Δείκτης")
             if ptr_act:
                 ptr_act.setChecked(True)
+        try:
+            self.geometry_changed.emit()
+        except Exception:
+            pass
         
 
     def delete_selected(self):
         for item in self.scene.selectedItems():
             # Try to delete via perimeter manager
             if self.perimeter_manager.delete_point_by_item(item):
+                try:
+                    self.geometry_changed.emit()
+                except Exception:
+                    pass
                 return
             
             if item in self.guide_items:
@@ -1044,7 +1330,21 @@ class DrawingView(QGraphicsView):
                 del self.state.guides[idx]
                 self.state.save_state()  # after deletion
                 self._refresh_guides()
+                try:
+                    self.geometry_changed.emit()
+                except Exception:
+                    pass
                 return
+
+    def _refresh_perimeter(self):
+        """Helper used by DraggablePoint to refresh UI after drag/move."""
+        try:
+            self.perimeter_manager.refresh_perimeter()
+        finally:
+            try:
+                self.geometry_changed.emit()
+            except Exception:
+                pass
 
 
     def analyze_grid_coverage(self):
