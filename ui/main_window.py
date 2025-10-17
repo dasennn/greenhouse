@@ -415,6 +415,31 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _settings_max_zoom(self):
+        """Allow user to change the maximum grid size when zooming out."""
+        try:
+            from PySide6.QtWidgets import QInputDialog
+            current_limit = getattr(self.view, 'max_grid_meters', 500)
+            
+            # QInputDialog.getDouble signature: (parent, title, label, value, min, max, decimals)
+            value, ok = QInputDialog.getDouble(
+                self,
+                "Μέγιστο Όριο Zoom Out",
+                "Μέγιστο μέγεθος πλέγματος κατά το zoom out (μέτρα):\n\n"
+                "Όσο μεγαλύτερη η τιμή, τόσο περισσότερο μπορείτε να κάνετε zoom out.\n"
+                "Προτεινόμενη τιμή: 500",
+                current_limit,  # value
+                10,             # min
+                10000,          # max
+                0               # decimals
+            )
+            
+            if ok:
+                self.view.max_grid_meters = float(value)
+                self.statusBar().showMessage(f"Το μέγιστο όριο zoom out ορίστηκε σε {value} μέτρα", 3000)
+        except Exception as e:
+            QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία αλλαγής ορίου: {e}")
+
     def _ensure_estimator(self):
         """Create an Estimator once, if available. Returns the instance or None."""
         if getattr(self, "estimator", None) is not None:
@@ -1059,6 +1084,12 @@ class MainWindow(QMainWindow):
         act_save_as.setShortcut("Ctrl+Shift+S")
         act_save_as.triggered.connect(self._project_save_as)
         proj.addAction(act_save_as)
+
+        # Settings menu (Ρυθμίσεις)
+        settings = mb.addMenu("Ρυθμίσεις")
+        act_max_zoom = QAction("Μέγιστο Όριο Zoom Out…", self)
+        act_max_zoom.triggered.connect(self._settings_max_zoom)
+        settings.addAction(act_max_zoom)
 
     def _project_title(self) -> str:
         name = None

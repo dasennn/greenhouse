@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QGraphicsScene, QGraphicsItem, QGraphicsPolygonIte
 from PySide6.QtGui import QPen, QColor, QBrush, QPolygonF
 from PySide6.QtCore import Qt, QPointF
 
-from services.geometry_utils import find_north_south_segments
+from services.geometry_utils import find_north_south_chains
 
 
 class TriangleOverlayManager:
@@ -43,31 +43,96 @@ class TriangleOverlayManager:
         
         # Resolve north horizontal segment
         pts = [(p.x(), p.y()) for p in points]
-        ns = find_north_south_segments(pts, tolerance_px=0.5)
-        north = ns.get("north") if ns else None
-        if not north:
+        ns = find_north_south_chains(pts)
+        if not ns or not ns["north"]:
             return
-        
-        (x1, y1) = north["p1"]
-        (x2, y2) = north["p2"]
-        
-        # Normalize left/right
-        if x2 < x1:
-            x1, x2 = x2, x1
-            y1, y2 = y2, y1
-        y0 = 0.5 * (y1 + y2)
 
+        # DEBUG VISUALIZATION: Draw the north chain in RED and south chain in BLUE
+        # Note: pts are already in pixel coordinates from QPointF.x() and .y()
+        
+        # Draw NORTH chain in RED (thick line)
+        north_chain = ns["north"]
+        if north_chain:
+            for seg in north_chain:
+                p1 = seg['p1']
+                p2 = seg['p2']
+                # Points are already in pixels, no need to scale
+                x1, y1 = p1[0], p1[1]
+                x2, y2 = p2[0], p2[1]
+                
+                line_item = self.scene.addLine(x1, y1, x2, y2, QPen(QColor(255, 0, 0), 5))
+                line_item.setZValue(1000)  # High z-value to draw on top
+                self.tri_items.append(line_item)
+        
+        # Draw SOUTH chain in BLUE (thick line)
+        south_chain = ns["south"]
+        if south_chain:
+            for seg in south_chain:
+                p1 = seg['p1']
+                p2 = seg['p2']
+                # Points are already in pixels, no need to scale
+                x1, y1 = p1[0], p1[1]
+                x2, y2 = p2[0], p2[1]
+                
+                line_item = self.scene.addLine(x1, y1, x2, y2, QPen(QColor(0, 0, 255), 5))
+                line_item.setZValue(1000)  # High z-value to draw on top
+                self.tri_items.append(line_item)
+
+        # The "north" chain is now a list of segments.
+        # We need to find the overall start and end points of the chain.
+        if not north_chain:
+            return
+            
+        # Extract all points from the chain and find the leftmost and rightmost
+        all_points = []
+        for seg in north_chain:
+            all_points.append(seg['p1'])
+            all_points.append(seg['p2'])
+        
+        # Get unique points, as segments share them
+        unique_points = sorted(list(set(all_points)), key=lambda p: p[0])
+        
+        start_point = unique_points[0]
+        end_point = unique_points[-1]
+
+        # Create a main segment representing the general direction of the north chain
+        main_segment = {
+            "p1": start_point,
+            "p2": end_point,
+            "midpoint": ((start_point[0] + end_point[0]) / 2, (start_point[1] + end_point[1]) / 2)
+        }
+        
+        self.draw_triangles_for_chain(main_segment)
+
+    def draw_triangles_for_chain(self, segment: dict):
+        """Draws triangular structures over a given segment representing a chain."""
         grid_w = self.grid_w_m * self.scale_factor
         grid_h = self.grid_h_m * self.scale_factor
-        module = grid_w  # one column wide (5 m)
-        apex_y = y0 - grid_h  # point upwards by one grid height (toward north)
-        pen = QPen(QColor("#555"), 2)
+        if grid_w <= 0:
+            return
 
-        # Full triangles
+        p1 = segment["p1"]
+        p2 = segment["p2"]
+        
+        # The points are already scaled from the service, so we use them directly
+        x1, y1 = p1[0], p1[1]
+        x2, y2 = p2[0], p2[1]
+
+        # Use the average y-value of the segment as the base for the triangles
+        y0 = (y1 + y2) / 2
+
+        if x1 > x2:
+            x1, x2 = x2, x1
+
         length = x2 - x1
         if length <= 0:
             return
 
+        module = grid_w  # one column wide (e.g., 5 m)
+        apex_y = y0 - grid_h  # point upwards by one grid height
+        pen = QPen(QColor("#555"), 2)
+
+        # Full triangles
         n_full = int(length // module)
         x = x1
         for _ in range(n_full):
@@ -79,7 +144,7 @@ class TriangleOverlayManager:
             self._create_triangle_item(poly, pen)
             x += module
 
-        # Half triangle if remainder >= half box (2.5 m)
+        # Half triangle if remainder >= half box
         rem = length - n_full * module
         half_w = 0.5 * grid_w
         if rem >= (half_w - 1e-6):

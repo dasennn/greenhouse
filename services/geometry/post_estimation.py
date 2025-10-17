@@ -8,7 +8,7 @@ from typing import List, Tuple, Optional, Dict
 import math
 from shapely.geometry import Polygon, LineString
 
-from .segment_analysis import find_north_south_segments
+from .segment_analysis import find_north_south_chains
 
 
 def estimate_triangle_posts_3x5_with_sides(
@@ -42,20 +42,33 @@ def estimate_triangle_posts_3x5_with_sides(
         return None
 
     pts = [(float(x), float(y)) for x, y in points]
-    ns = find_north_south_segments(pts, tolerance_px=tolerance_px)
+    ns = find_north_south_chains(pts)
     north = ns.get("north") if ns else None
     south = ns.get("south") if ns else None
     if not north or not south:
         return None
 
-    # Normalize north endpoints and derive width in pixels
-    (nx1, ny1) = north["p1"]
-    (nx2, ny2) = north["p2"]
-    if nx2 < nx1:
-        nx1, nx2 = nx2, nx1
-        ny1, ny2 = ny2, ny1
-    north_y = 0.5 * (ny1 + ny2)
+    # North is now a list of segments. Find the overall bounding box.
+    # Collect all points from north segments
+    north_points = []
+    for seg in north:
+        north_points.append(seg["p1"])
+        north_points.append(seg["p2"])
+    
+    # Get the leftmost and rightmost x-coordinates
+    north_xs = [p[0] for p in north_points]
+    north_ys = [p[1] for p in north_points]
+    nx1, nx2 = min(north_xs), max(north_xs)
+    north_y = sum(north_ys) / len(north_ys)  # Average y
     width_px = max(0.0, nx2 - nx1)
+
+    # South segments for depth calculation
+    south_points = []
+    for seg in south:
+        south_points.append(seg["p1"])
+        south_points.append(seg["p2"])
+    south_ys = [p[1] for p in south_points]
+    south_y = sum(south_ys) / len(south_ys)
 
     # Grid step sizes (pixels)
     grid_w_px = grid_w_m * scale_factor
@@ -137,22 +150,31 @@ def estimate_triangle_posts_3x5_with_sides_per_row(
     xs = [x for x, _ in pts]
     minx, maxx = min(xs), max(xs)
 
-    ns = find_north_south_segments(pts, tolerance_px=tolerance_px)
+    ns = find_north_south_chains(pts)
     north = ns.get("north") if ns else None
     south = ns.get("south") if ns else None
     if not north or not south:
         return None
 
-    (nx1, ny1) = north["p1"]
-    (nx2, ny2) = north["p2"]
-    if nx2 < nx1:
-        nx1, nx2 = nx2, nx1
-        ny1, ny2 = ny2, ny1
-    north_y = 0.5 * (ny1 + ny2)
+    # North is a list of segments. Get bounding info.
+    north_points = []
+    for seg in north:
+        north_points.append(seg["p1"])
+        north_points.append(seg["p2"])
+    
+    north_xs = [p[0] for p in north_points]
+    north_ys = [p[1] for p in north_points]
+    nx1, nx2 = min(north_xs), max(north_xs)
+    north_y = sum(north_ys) / len(north_ys)
 
-    (sx1, sy1) = south["p1"]
-    (sx2, sy2) = south["p2"]
-    south_y = 0.5 * (sy1 + sy2)
+    # South segments
+    south_points = []
+    for seg in south:
+        south_points.append(seg["p1"])
+        south_points.append(seg["p2"])
+    
+    south_ys = [p[1] for p in south_points]
+    south_y = sum(south_ys) / len(south_ys)
 
     grid_w_px = grid_w_m * scale_factor
     grid_h_px = grid_h_m * scale_factor

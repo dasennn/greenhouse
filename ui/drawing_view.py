@@ -56,6 +56,7 @@ class DrawingView(QGraphicsView):
         self.grid_meters = 0.1
         self.grid_size = self.grid_meters * self.scale_factor
         self.snap_tol_px = 10
+        self.max_grid_meters = 500  # Maximum grid size when zooming out
         
         # Greenhouse grid dimensions in meters
         self.grid_w_m = 5.0
@@ -538,6 +539,24 @@ class DrawingView(QGraphicsView):
 
     def wheelEvent(self, event):
         factor = 1.2 if event.angleDelta().y() > 0 else 0.8
+        
+        # Prevent zooming out too far
+        if factor < 1:  # Zooming out
+            # Get the current viewport rect in scene coordinates
+            viewport_rect = self.mapToScene(self.viewport().rect()).boundingRect()
+            viewport_width_px = viewport_rect.width()
+            
+            # After zooming out, the viewport will show more of the scene
+            potential_viewport_width_px = viewport_width_px / factor
+            
+            # Convert to meters
+            potential_viewport_width_m = potential_viewport_width_px / self.scale_factor
+            
+            # Check if this exceeds our limit
+            if potential_viewport_width_m > self.max_grid_meters:
+                # Don't allow zoom out
+                return
+        
         self.scale(factor, factor)
 
     def zoom_to_drawing(self):

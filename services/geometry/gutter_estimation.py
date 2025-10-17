@@ -7,7 +7,7 @@ based on greenhouse dimensions and grid layout.
 from typing import List, Tuple, Optional, Dict
 import math
 
-from .segment_analysis import find_north_south_segments
+from .segment_analysis import find_north_south_chains
 
 
 def estimate_gutters_length(
@@ -41,28 +41,37 @@ def estimate_gutters_length(
         return None
 
     pts = [(float(x), float(y)) for x, y in points]
-    ns = find_north_south_segments(pts, tolerance_px=tolerance_px)
+    ns = find_north_south_chains(pts)
     north = ns.get("north") if ns else None
     south = ns.get("south") if ns else None
     if not north or not south:
         return None
 
-    (nx1, ny1) = north["p1"]
-    (nx2, ny2) = north["p2"]
-    if nx2 < nx1:
-        nx1, nx2 = nx2, nx1
-        ny1, ny2 = ny2, ny1
-    north_y = 0.5 * (ny1 + ny2)
-    width_px = max(0.0, nx2 - nx1)
-
-    (sx1, sy1) = south["p1"]
-    (sx2, sy2) = south["p2"]
-    south_y = 0.5 * (sy1 + sy2)
+    # North and south are now lists of segments, not single segments
+    # Calculate total length by summing all segment lengths
+    north_length = sum(seg["length"] for seg in north)
+    south_length = sum(seg["length"] for seg in south)
+    
+    # Get bounding info for north and south
+    north_points = []
+    for seg in north:
+        north_points.append(seg["p1"])
+        north_points.append(seg["p2"])
+    north_ys = [p[1] for p in north_points]
+    north_y = sum(north_ys) / len(north_ys)
+    
+    south_points = []
+    for seg in south:
+        south_points.append(seg["p1"])
+        south_points.append(seg["p2"])
+    south_ys = [p[1] for p in south_points]
+    south_y = sum(south_ys) / len(south_ys)
+    
     depth_px = max(0.0, south_y - north_y)
 
     if scale_factor <= 0:
         return None
-    width_m = width_px / scale_factor
+    width_m = north_length / scale_factor  # Use actual north length
     depth_m = depth_px / scale_factor
 
     # Align gutter vertical lines with triangle modules (now 5 m)
