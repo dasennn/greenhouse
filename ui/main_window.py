@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
 )
-from PySide6.QtCore import Qt, QPointF, QTimer
+from PySide6.QtCore import Qt, QPointF, QTimer, QSettings
 from PySide6.QtGui import QAction, QActionGroup
 
 from services.estimator import Estimator, default_material_catalog
@@ -148,6 +148,7 @@ class MainWindow(QMainWindow):
         self._autosave_timer = None
         self._autosave_path = self._autosave_file_path()
         self._autosave_enabled = True
+        self._last_directory = None  # Track last opened/saved directory
         self._dirty = False
         # Optional project type label (human-friendly preset label)
         self._project_type_label = None
@@ -164,6 +165,12 @@ class MainWindow(QMainWindow):
             pass
         # Suppress repeated save prompts when user chose "Don't Save" for current changes
         self._suppress_save_prompt = False
+
+        # Initialize QSettings for persistent user preferences
+        self.settings = QSettings("Greenhouse", "GreenhouseApp")
+        
+        # Load user settings
+        self._load_user_settings()
 
         # Menubar and primary UI
         self._create_menubar()
@@ -436,9 +443,73 @@ class MainWindow(QMainWindow):
             
             if ok:
                 self.view.max_grid_meters = float(value)
+                self._save_user_settings()  # Save the setting
                 self.statusBar().showMessage(f"Το μέγιστο όριο zoom out ορίστηκε σε {value} μέτρα", 3000)
         except Exception as e:
             QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία αλλαγής ορίου: {e}")
+
+    def _toggle_autosave(self):
+        """Toggle autosave on/off."""
+        self._autosave_enabled = self.act_autosave.isChecked()
+        
+        if self._autosave_enabled:
+            self._start_autosave_timer()
+            self.statusBar().showMessage("Αυτόματη αποθήκευση ενεργοποιήθηκε", 3000)
+        else:
+            if self._autosave_timer:
+                self._autosave_timer.stop()
+            self.statusBar().showMessage("Αυτόματη αποθήκευση απενεργοποιήθηκε", 3000)
+        
+        self._save_user_settings()  # Save the preference
+
+    def _load_user_settings(self):
+        """Load user preferences from QSettings."""
+        try:
+            # Load max zoom limit
+            max_grid_meters = self.settings.value("view/max_grid_meters", 500, type=float)
+            self.view.max_grid_meters = max_grid_meters
+            
+            # Load autosave enabled state
+            self._autosave_enabled = self.settings.value("general/autosave_enabled", True, type=bool)
+            
+            # Load autosave interval (in milliseconds, default 30 seconds)
+            autosave_interval = self.settings.value("general/autosave_interval", 30000, type=int)
+            
+            # Load last opened directory
+            last_dir = self.settings.value("paths/last_directory", "", type=str)
+            if last_dir:
+                self._last_directory = Path(last_dir)
+            
+            # Future settings can be added here:
+            # - Window geometry/state
+            # - Default grid presets
+            # - Material catalog path
+            # - Export preferences
+            # - UI theme/language
+            
+        except Exception as e:
+            print(f"Warning: Failed to load user settings: {e}")
+
+    def _save_user_settings(self):
+        """Save user preferences to QSettings."""
+        try:
+            # Save max zoom limit
+            self.settings.setValue("view/max_grid_meters", self.view.max_grid_meters)
+            
+            # Save autosave settings
+            self.settings.setValue("general/autosave_enabled", self._autosave_enabled)
+            if hasattr(self, '_autosave_timer') and self._autosave_timer:
+                self.settings.setValue("general/autosave_interval", self._autosave_timer.interval())
+            
+            # Save last opened directory if exists
+            if hasattr(self, '_last_directory') and self._last_directory:
+                self.settings.setValue("paths/last_directory", str(self._last_directory))
+            
+            # Future settings can be added here
+            
+            self.settings.sync()  # Ensure settings are written to disk
+        except Exception as e:
+            print(f"Warning: Failed to save user settings: {e}")
 
     def _ensure_estimator(self):
         """Create an Estimator once, if available. Returns the instance or None."""
@@ -1087,9 +1158,18 @@ class MainWindow(QMainWindow):
 
         # Settings menu (Ρυθμίσεις)
         settings = mb.addMenu("Ρυθμίσεις")
+        
+        # Max zoom out setting
         act_max_zoom = QAction("Μέγιστο Όριο Zoom Out…", self)
         act_max_zoom.triggered.connect(self._settings_max_zoom)
         settings.addAction(act_max_zoom)
+        
+        # Autosave toggle
+        self.act_autosave = QAction("Αυτόματη Αποθήκευση", self)
+        self.act_autosave.setCheckable(True)
+        self.act_autosave.setChecked(self._autosave_enabled)
+        self.act_autosave.triggered.connect(self._toggle_autosave)
+        settings.addAction(self.act_autosave)
 
     def _project_title(self) -> str:
         name = None
@@ -1215,10 +1295,16 @@ class MainWindow(QMainWindow):
         if not self._maybe_save_before_loss():
             return False
         try:
-            fname, _ = QFileDialog.getOpenFileName(self, "Φόρτωση Μελέτης", str(Path.cwd()), f"Greenhouse Project (*{PROJECT_EXT});;Όλα τα αρχεία (*)")
+            # Use last directory if available
+            start_dir = str(self._last_directory) if self._last_directory else str(Path.cwd())
+            fname, _ = QFileDialog.getOpenFileName(self, "Φόρτωση Μελέτης", start_dir, f"Greenhouse Project (*{PROJECT_EXT});;Όλα τα αρχεία (*)")
             if not fname:
                 return False
             path = Path(fname)
+            # Remember this directory
+            self._last_directory = path.parent
+            self._save_user_settings()
+            
             data = json.loads(path.read_text(encoding='utf-8'))
         except Exception as e:
             QMessageBox.warning(self, "Σφάλμα", f"Αποτυχία φόρτωσης μελέτης: {e}")
@@ -1268,12 +1354,19 @@ class MainWindow(QMainWindow):
     def _project_save_as(self):
         try:
             suggested = (self._project_name or "project") + PROJECT_EXT
-            fname, _ = QFileDialog.getSaveFileName(self, "Αποθήκευση Μελέτης ως…", str(self._projects_dir_path() / suggested), f"Greenhouse Project (*{PROJECT_EXT});;Όλα τα αρχεία (*)")
+            # Use last directory if available
+            start_dir = self._last_directory if self._last_directory else self._projects_dir_path()
+            fname, _ = QFileDialog.getSaveFileName(self, "Αποθήκευση Μελέτης ως…", str(start_dir / suggested), f"Greenhouse Project (*{PROJECT_EXT});;Όλα τα αρχεία (*)")
             if not fname:
                 return False
             path = Path(fname)
             if path.suffix.lower() != PROJECT_EXT:
                 path = path.with_suffix(PROJECT_EXT)
+            
+            # Remember this directory
+            self._last_directory = path.parent
+            self._save_user_settings()
+            
             data = self._project_to_dict()
             path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
             self._project_path = path
