@@ -8,6 +8,9 @@ class MaterialItem:
     name: str
     unit: str = "κομμάτι"  # e.g., piece, m, kg
     unit_price: float = 0.0
+    thickness: str = "-"  # Πάχος (π.χ. 2", 1.5", 1")
+    height: str = "-"     # Ύψος (π.χ. 2m60, 2m00)
+    length: str = "-"     # Μήκος (π.χ. 3m, 4m)
 
 
 @dataclass

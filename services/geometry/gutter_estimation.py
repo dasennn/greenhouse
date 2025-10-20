@@ -16,6 +16,7 @@ def estimate_gutters_length(
     grid_h_m: float = 3.0,
     scale_factor: float = 5.0,
     tolerance_px: float = 0.75,
+    side_gutter_type: str = "full",  # "full" ή "half" για τις πλευρικές υδρορροές
 ) -> Optional[Dict[str, float]]:
     """Estimate total number of gutter pieces needed.
 
@@ -26,6 +27,10 @@ def estimate_gutters_length(
     - Each vertical line is covered by pieces of length equal to grid_h_m (3m for 5x3, 4m for 5x4).
       pieces_per_line = ceil(depth / grid_h_m).
     - Total pieces = lines_x * pieces_per_line.
+    
+    Οι πλευρικές υδρορροές (εξωτερικές αριστερά/δεξιά) μπορούν να είναι:
+    - "full": ολόκληρες υδρορροές (gutter_3m ή gutter_4m)
+    - "half": μισές υδρορροές (gutter_3m_half ή gutter_4m_half)
 
     Args:
         points: List of (x, y) tuples in scene coordinates (pixels)
@@ -33,6 +38,7 @@ def estimate_gutters_length(
         grid_h_m: Grid cell height in meters (also gutter piece length)
         scale_factor: Pixels per meter conversion factor
         tolerance_px: Tolerance for horizontal segment detection
+        side_gutter_type: "full" or "half" for side gutters
     
     Returns:
         Dict with a breakdown of gutter calculation or None if invalid input
@@ -85,6 +91,12 @@ def estimate_gutters_length(
     pieces_per_line = int(math.ceil(depth_m / piece_len_m)) if piece_len_m > 0 else 0
     total_pieces = lines_x * pieces_per_line
 
+    # Υπολογισμός πλευρικών υδρορροών (οι 2 εξωτερικές γραμμές - αριστερά και δεξιά)
+    side_pieces = 2 * pieces_per_line if lines_x >= 2 else 0
+    
+    # Οι υπόλοιπες είναι εσωτερικές/εμπρός-πίσω
+    internal_pieces = total_pieces - side_pieces
+
     return {
         "grid_w_m": grid_w_m,
         "grid_h_m": grid_h_m,
@@ -97,5 +109,8 @@ def estimate_gutters_length(
         "piece_len_m": piece_len_m,
         "pieces_per_line": pieces_per_line,
         "total_pieces": total_pieces,
+        "side_pieces": side_pieces,  # Πλευρικές υδρορροές (2 εξωτερικές γραμμές)
+        "internal_pieces": internal_pieces,  # Εσωτερικές/εμπρός-πίσω υδρορροές
+        "side_gutter_type": side_gutter_type,  # "full" ή "half"
         "notes": "lines_x = max(2, floor(width/(grid_w))+1); pieces_per_line = ceil(depth/grid_h).",
     }

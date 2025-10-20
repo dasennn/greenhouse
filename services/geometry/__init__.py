@@ -31,6 +31,11 @@ from .koutelou_estimation import (
 from .plevra_estimation import (
     estimate_plevra,
 )
+from .post_classification import (
+    classify_all_posts,
+    detect_corners,
+    classify_post_by_location,
+)
 
 __all__ = [
     # Polygon coverage
@@ -47,4 +52,8 @@ __all__ = [
     'estimate_koutelou_pairs',
     # Plevra estimation
     'estimate_plevra',
+    # Post classification
+    'classify_all_posts',
+    'detect_corners',
+    'classify_post_by_location',
 ]

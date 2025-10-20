@@ -122,11 +122,33 @@ def estimate_material_quantities(
     if ridge_qty > 0:
         quantities["ridge_cap"] = ridge_qty
 
-    # Gutters
-    gut_qty = _safe_float(gutters_est, "total_pieces")
-    if gut_qty > 0:
-        code = choose_gutter_code(grid_h_m)
-        quantities[code] = gut_qty
+    # Gutters - διαχωρισμός σε πλευρικές και εσωτερικές
+    if gutters_est:
+        side_pieces = _safe_float(gutters_est, "side_pieces")  # Πλευρικές (αριστερά/δεξιά)
+        internal_pieces = _safe_float(gutters_est, "internal_pieces")  # Εσωτερικές/εμπρός-πίσω
+        side_type = gutters_est.get("side_gutter_type", "full")  # "full" ή "half"
+        
+        # Επιλογή κωδικού βάσει grid_h_m
+        if abs(grid_h_m - 3.0) < EPS:
+            full_code = "gutter_3m"
+            half_code = "gutter_3m_half"
+        elif abs(grid_h_m - 4.0) < EPS:
+            full_code = "gutter_4m"
+            half_code = "gutter_4m_half"
+        else:
+            full_code = "gutter_piece"
+            half_code = "gutter_piece"  # Fallback: δεν υπάρχει μισή
+        
+        # Πλευρικές υδρορροές
+        if side_pieces > 0:
+            if side_type == "half":
+                quantities[half_code] = side_pieces
+            else:
+                quantities[full_code] = quantities.get(full_code, 0.0) + side_pieces
+        
+        # Εσωτερικές υδρορροές (πάντα full)
+        if internal_pieces > 0:
+            quantities[full_code] = quantities.get(full_code, 0.0) + internal_pieces
 
     # Koutelou pairs (ζεύγη κουτελού)
     # Μπαίνουν μόνο στις προσόψεις (βορράς και νότος) αν είναι κανονικές
