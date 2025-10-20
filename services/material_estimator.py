@@ -53,10 +53,23 @@ def choose_gutter_code(grid_h_m: float) -> str:
     return "gutter_piece"
 
 
-def estimate_material_quantities(posts_est: Optional[dict], gutters_est: Optional[dict], grid_h_m: float) -> Dict[str, float]:
+def estimate_material_quantities(
+    posts_est: Optional[dict],
+    gutters_est: Optional[dict],
+    koutelou_est: Optional[dict],
+    plevra_est: Optional[dict],
+    grid_h_m: float
+) -> Dict[str, float]:
     """Return {material_code: quantity} based on geometric estimates.
 
     This function encodes the mapping rules in a single place.
+    
+    Args:
+        posts_est: Post estimation results
+        gutters_est: Gutter estimation results
+        koutelou_est: Koutelou pair estimation results
+        plevra_est: Plevra (side support) estimation results
+        grid_h_m: Grid height in meters
     """
     quantities: Dict[str, float] = {}
 
@@ -114,5 +127,19 @@ def estimate_material_quantities(posts_est: Optional[dict], gutters_est: Optiona
     if gut_qty > 0:
         code = choose_gutter_code(grid_h_m)
         quantities[code] = gut_qty
+
+    # Koutelou pairs (ζεύγη κουτελού)
+    # Μπαίνουν μόνο στις προσόψεις (βορράς και νότος) αν είναι κανονικές
+    # Κάθε πυραμίδα χρειάζεται 2 ζεύγη: (χαμηλός→ψηλός στύλος) + (κορφιάτης→υδρορροή)
+    koutelou_pairs = _safe_float(koutelou_est, "total_pairs")
+    if koutelou_pairs > 0:
+        quantities["koutelou_pair"] = koutelou_pairs
+
+    # Plevra (πλευρά - κανονικά πλευρά)
+    # Τοποθετούνται κατά μήκος του άξονα Υ (βάθος)
+    # Πρώτο: 0.5m από προσόψη, μετά ανά 1m
+    plevra_count = _safe_float(plevra_est, "total_plevra")
+    if plevra_count > 0:
+        quantities["plevra"] = plevra_count
 
     return quantities

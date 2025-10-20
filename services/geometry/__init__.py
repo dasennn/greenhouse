@@ -25,6 +25,12 @@ from .post_estimation import (
 from .gutter_estimation import (
     estimate_gutters_length,
 )
+from .koutelou_estimation import (
+    estimate_koutelou_pairs,
+)
+from .plevra_estimation import (
+    estimate_plevra,
+)
 
 __all__ = [
     # Polygon coverage
@@ -37,4 +43,8 @@ __all__ = [
     'estimate_triangle_posts_3x5_with_sides_per_row',
     # Gutter estimation
     'estimate_gutters_length',
+    # Koutelou estimation
+    'estimate_koutelou_pairs',
+    # Plevra estimation
+    'estimate_plevra',
 ]

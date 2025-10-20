@@ -28,6 +28,8 @@ from services.geometry_utils import (
     compute_grid_coverage as geom_compute_grid_coverage,
     estimate_triangle_posts_3x5_with_sides,
     estimate_gutters_length,
+    estimate_koutelou_pairs,
+    estimate_plevra,
 )
 from ui.drawing_view import DrawingView
 from ui.column_height_dialog import ColumnHeightDialog
@@ -627,10 +629,28 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             gutters = None
+        try:
+            koutelou = estimate_koutelou_pairs(
+                xy,
+                grid_w_m=getattr(self.view, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self.view, 'grid_h_m', 3.0),
+                scale_factor=self.view.scale_factor,
+            )
+        except Exception:
+            koutelou = None
+        try:
+            plevra = estimate_plevra(
+                xy,
+                grid_w_m=getattr(self.view, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self.view, 'grid_h_m', 3.0),
+                scale_factor=self.view.scale_factor,
+            )
+        except Exception:
+            plevra = None
         est = self._ensure_estimator()
         if est is not None:
             try:
-                bom = est.compute_bom(posts, gutters, grid_h_m=getattr(self.view, 'grid_h_m', 3.0))
+                bom = est.compute_bom(posts, gutters, koutelou, plevra, grid_h_m=getattr(self.view, 'grid_h_m', 3.0))
                 self._update_bom_pane(bom)
             except Exception:
                 pass
@@ -1790,10 +1810,28 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             gutters = None
+        try:
+            koutelou = estimate_koutelou_pairs(
+                xy,
+                grid_w_m=getattr(self.view, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self.view, 'grid_h_m', 3.0),
+                scale_factor=self.view.scale_factor,
+            )
+        except Exception:
+            koutelou = None
+        try:
+            plevra = estimate_plevra(
+                xy,
+                grid_w_m=getattr(self.view, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self.view, 'grid_h_m', 3.0),
+                scale_factor=self.view.scale_factor,
+            )
+        except Exception:
+            plevra = None
         est = self._ensure_estimator()
         if est is not None:
             try:
-                bom = est.compute_bom(posts, gutters, grid_h_m=getattr(self.view, 'grid_h_m', 3.0))
+                bom = est.compute_bom(posts, gutters, koutelou, plevra, grid_h_m=getattr(self.view, 'grid_h_m', 3.0))
                 self._update_bom_pane(bom)
             except Exception:
                 pass

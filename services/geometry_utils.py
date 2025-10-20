@@ -18,6 +18,8 @@ from services.geometry import (
     estimate_triangle_posts_3x5_with_sides,
     estimate_triangle_posts_3x5_with_sides_per_row,
     estimate_gutters_length,
+    estimate_koutelou_pairs,
+    estimate_plevra,
 )
 
 __all__ = [
@@ -27,4 +29,6 @@ __all__ = [
     'estimate_triangle_posts_3x5_with_sides',
     'estimate_triangle_posts_3x5_with_sides_per_row',
     'estimate_gutters_length',
+    'estimate_koutelou_pairs',
+    'estimate_plevra',
 ]

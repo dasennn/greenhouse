@@ -15,6 +15,8 @@ MATERIAL_DEFAULTS = [
     ("gutter_3m",    "Υδρορροή 3m",        "piece", 9.80),
     ("gutter_4m",    "Υδρορροή 4m",        "piece", 12.40),
     ("gutter_piece", "Υδρορροή (κομμάτι)", "piece", 10.50),  # generic fallback
+    ("koutelou_pair", "Ζεύγη Κουτελού",    "piece", 8.50),  # ανά ζεύγος (2 τεμάχια)
+    ("plevra",       "Πλευρά",            "piece", 6.50),  # ανά πλευρό
 ]
 
 def default_material_catalog() -> Dict[str, MaterialItem]:

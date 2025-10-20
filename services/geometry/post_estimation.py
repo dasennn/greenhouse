@@ -89,9 +89,14 @@ def estimate_triangle_posts_3x5_with_sides(
     low_per_row = n_full + 1
 
     # Number of grid lines through depth = floor(depth/3m) + 1
-    (sx1, sy1) = south["p1"]
-    (sx2, sy2) = south["p2"]
-    south_y = 0.5 * (sy1 + sy2)
+    # South is a list of segments - get all y coordinates
+    south_points = []
+    for seg in south:
+        south_points.append(seg["p1"])
+        south_points.append(seg["p2"])
+    south_ys = [p[1] for p in south_points]
+    south_y = sum(south_ys) / len(south_ys)
+    
     height_px = max(0.0, south_y - north_y)
     n_rows = int(max(0, math.floor(height_px / grid_h_px))) + 1
 

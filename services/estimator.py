@@ -26,7 +26,14 @@ class Estimator:
             return MaterialItem(code=code, name=code, unit="piece", unit_price=0.0)
         return mat
 
-    def compute_bom(self, posts_est: Optional[dict], gutters_est: Optional[dict], grid_h_m: float) -> BillOfMaterials:
+    def compute_bom(
+        self,
+        posts_est: Optional[dict],
+        gutters_est: Optional[dict],
+        koutelou_est: Optional[dict],
+        plevra_est: Optional[dict],
+        grid_h_m: float
+    ) -> BillOfMaterials:
         """Build a bill of materials from geometric estimates.
 
         Flow:
@@ -34,8 +41,15 @@ class Estimator:
            geometry outputs into {material_code: quantity}.
         2) For each entry, look up MaterialItem (name/unit/price) and create
            a BillLine with calculated total and accumulate subtotal.
+        
+        Args:
+            posts_est: Post estimation results
+            gutters_est: Gutter estimation results
+            koutelou_est: Koutelou pair estimation results
+            plevra_est: Plevra (side support) estimation results
+            grid_h_m: Grid height in meters
         """
-        quantities = estimate_material_quantities(posts_est, gutters_est, grid_h_m)
+        quantities = estimate_material_quantities(posts_est, gutters_est, koutelou_est, plevra_est, grid_h_m)
 
         lines: List[BillLine] = []
         subtotal = 0.0
