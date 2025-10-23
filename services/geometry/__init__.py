@@ -31,6 +31,9 @@ from .koutelou_estimation import (
 from .plevra_estimation import (
     estimate_plevra,
 )
+from .cultivation_pipes_estimation import (
+    estimate_cultivation_pipes,
+)
 from .post_classification import (
     classify_all_posts,
     detect_corners,
@@ -52,6 +55,8 @@ __all__ = [
     'estimate_koutelou_pairs',
     # Plevra estimation
     'estimate_plevra',
+    # Cultivation pipes estimation
+    'estimate_cultivation_pipes',
     # Post classification
     'classify_all_posts',
     'detect_corners',

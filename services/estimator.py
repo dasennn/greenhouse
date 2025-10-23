@@ -32,6 +32,7 @@ class Estimator:
         gutters_est: Optional[dict],
         koutelou_est: Optional[dict],
         plevra_est: Optional[dict],
+        cultivation_pipes_est: Optional[dict],
         grid_h_m: float
     ) -> BillOfMaterials:
         """Build a bill of materials from geometric estimates.
@@ -47,9 +48,10 @@ class Estimator:
             gutters_est: Gutter estimation results
             koutelou_est: Koutelou pair estimation results
             plevra_est: Plevra (side support) estimation results
+            cultivation_pipes_est: Cultivation pipes estimation results
             grid_h_m: Grid height in meters
         """
-        quantities = estimate_material_quantities(posts_est, gutters_est, koutelou_est, plevra_est, grid_h_m)
+        quantities = estimate_material_quantities(posts_est, gutters_est, koutelou_est, plevra_est, cultivation_pipes_est, grid_h_m)
 
         lines: List[BillLine] = []
         subtotal = 0.0

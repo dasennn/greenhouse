@@ -58,6 +58,7 @@ def estimate_material_quantities(
     gutters_est: Optional[dict],
     koutelou_est: Optional[dict],
     plevra_est: Optional[dict],
+    cultivation_pipes_est: Optional[dict],
     grid_h_m: float
 ) -> Dict[str, float]:
     """Return {material_code: quantity} based on geometric estimates.
@@ -69,6 +70,7 @@ def estimate_material_quantities(
         gutters_est: Gutter estimation results
         koutelou_est: Koutelou pair estimation results
         plevra_est: Plevra (side support) estimation results
+        cultivation_pipes_est: Cultivation pipes estimation results
         grid_h_m: Grid height in meters
     """
     quantities: Dict[str, float] = {}
@@ -163,5 +165,20 @@ def estimate_material_quantities(
     plevra_count = _safe_float(plevra_est, "total_plevra")
     if plevra_count > 0:
         quantities["plevra"] = plevra_count
+
+    # Cultivation pipes (σωλήνες καλλιέργειας)
+    # Μπαίνουν παράλληλα στο οριζόντιο τμήμα (κάθετα με την καλλιέργεια)
+    # Διαχωρισμός σε: αριστερά (πάτημα-στένεμα), μέση (στένεμα-ανοιχτό), δεξιά (πάτημα-ανοιχτό)
+    if cultivation_pipes_est:
+        left_pieces = _safe_float(cultivation_pipes_est, "left_pieces")
+        middle_pieces = _safe_float(cultivation_pipes_est, "middle_pieces")
+        right_pieces = _safe_float(cultivation_pipes_est, "right_pieces")
+        
+        if left_pieces > 0:
+            quantities["cultivation_pipe_left"] = left_pieces
+        if middle_pieces > 0:
+            quantities["cultivation_pipe_middle"] = middle_pieces
+        if right_pieces > 0:
+            quantities["cultivation_pipe_right"] = right_pieces
 
     return quantities

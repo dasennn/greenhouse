@@ -133,6 +133,18 @@ class MaterialSettingsDialog(QDialog):
         koutelou_group = QGroupBox("Ζεύγη Κουτελού")
         koutelou_layout = QFormLayout()
         
+        # Πάχος σωλήνα κουτελού
+        self.koutelou_thickness = QComboBox()
+        self.koutelou_thickness.addItems([
+            '1" (25.4 mm)',
+            '1.5" (38.1 mm)',
+            '2" (50.8 mm)',
+        ])
+        self.koutelou_thickness.setCurrentIndex(0)  # Default: 1"
+        koutelou_layout.addRow("Πάχος Σωλήνα:", self.koutelou_thickness)
+        
+        koutelou_layout.addRow(QLabel(""))  # Spacer
+        
         self.koutelou_length = QDoubleSpinBox()
         self.koutelou_length.setRange(0.1, 50.0)
         self.koutelou_length.setDecimals(2)
@@ -223,6 +235,39 @@ class MaterialSettingsDialog(QDialog):
         ridge_group.setLayout(ridge_layout)
         scroll_layout.addWidget(ridge_group)
         
+        # === Σωλήνες Καλλιέργειας ===
+        cultivation_group = QGroupBox("Σωλήνες Καλλιέργειας")
+        cultivation_layout = QFormLayout()
+        
+        # Πάχος σωλήνα καλλιέργειας
+        self.cultivation_thickness = QComboBox()
+        self.cultivation_thickness.addItems([
+            '1" (25.4 mm)',
+            '1.5" (38.1 mm)',
+            '2" (50.8 mm)',
+        ])
+        self.cultivation_thickness.setCurrentIndex(0)  # Default: 1"
+        cultivation_layout.addRow("Πάχος Σωλήνα:", self.cultivation_thickness)
+        
+        cultivation_layout.addRow(QLabel(""))  # Spacer
+        
+        self.cultivation_pipe_length = QDoubleSpinBox()
+        self.cultivation_pipe_length.setRange(0.1, 50.0)
+        self.cultivation_pipe_length.setDecimals(2)
+        self.cultivation_pipe_length.setSuffix(" m")
+        self.cultivation_pipe_length.setValue(5.0)
+        cultivation_layout.addRow("Μήκος Σωλήνα:", self.cultivation_pipe_length)
+        
+        self.cultivation_pipe_price = QDoubleSpinBox()
+        self.cultivation_pipe_price.setRange(0.0, 10000.0)
+        self.cultivation_pipe_price.setDecimals(2)
+        self.cultivation_pipe_price.setSuffix(" EUR")
+        self.cultivation_pipe_price.setValue(8.00)
+        cultivation_layout.addRow("Τιμή ανά Σωλήνα:", self.cultivation_pipe_price)
+        
+        cultivation_group.setLayout(cultivation_layout)
+        scroll_layout.addWidget(cultivation_group)
+        
         # Stretch at the end
         scroll_layout.addStretch()
         
@@ -232,11 +277,19 @@ class MaterialSettingsDialog(QDialog):
         
         # Buttons
         button_box = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.RestoreDefaults
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply | QDialogButtonBox.RestoreDefaults
         )
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
+        button_box.button(QDialogButtonBox.Apply).clicked.connect(self._apply_settings)
         button_box.button(QDialogButtonBox.RestoreDefaults).clicked.connect(self._restore_defaults)
+        
+        # Customize button text to Greek
+        button_box.button(QDialogButtonBox.Apply).setText("Εφαρμογή")
+        button_box.button(QDialogButtonBox.Ok).setText("OK")
+        button_box.button(QDialogButtonBox.Cancel).setText("Άκυρο")
+        button_box.button(QDialogButtonBox.RestoreDefaults).setText("Επαναφορά")
+        
         layout.addWidget(button_box)
     
     def _load_settings(self):
@@ -282,6 +335,17 @@ class MaterialSettingsDialog(QDialog):
         # Ridge
         if "ridge_price" in self.current_settings:
             self.ridge_price.setValue(self.current_settings["ridge_price"])
+        
+        # Cultivation pipes
+        if "cultivation_pipe_length" in self.current_settings:
+            self.cultivation_pipe_length.setValue(self.current_settings["cultivation_pipe_length"])
+        if "cultivation_pipe_price" in self.current_settings:
+            self.cultivation_pipe_price.setValue(self.current_settings["cultivation_pipe_price"])
+    
+    def _apply_settings(self):
+        """Apply current settings and emit signal without closing dialog."""
+        settings = self.get_settings()
+        self.settings_changed.emit(settings)
     
     def _restore_defaults(self):
         """Restore default values."""
@@ -299,6 +363,7 @@ class MaterialSettingsDialog(QDialog):
         self.gutter_4m_price.setValue(12.40)
         
         # Koutelou
+        self.koutelou_thickness.setCurrentIndex(0)  # 1"
         self.koutelou_length.setValue(2.54)
         self.koutelou_price.setValue(8.50)
         
@@ -312,6 +377,11 @@ class MaterialSettingsDialog(QDialog):
         # Ridge
         self.ridge_thickness.setCurrentIndex(0)  # 2"
         self.ridge_price.setValue(7.20)
+        
+        # Cultivation pipes
+        self.cultivation_thickness.setCurrentIndex(0)  # 1"
+        self.cultivation_pipe_length.setValue(5.0)
+        self.cultivation_pipe_price.setValue(8.00)
     
     def get_settings(self):
         """Return current settings as dict."""
@@ -330,6 +400,7 @@ class MaterialSettingsDialog(QDialog):
             "gutter_4m_price": self.gutter_4m_price.value(),
             
             # Koutelou
+            "koutelou_thickness": self.koutelou_thickness.currentText(),
             "koutelou_length": self.koutelou_length.value(),
             "koutelou_price": self.koutelou_price.value(),
             
@@ -343,4 +414,9 @@ class MaterialSettingsDialog(QDialog):
             # Ridge
             "ridge_thickness": self.ridge_thickness.currentText(),
             "ridge_price": self.ridge_price.value(),
+            
+            # Cultivation pipes
+            "cultivation_thickness": self.cultivation_thickness.currentText(),
+            "cultivation_pipe_length": self.cultivation_pipe_length.value(),
+            "cultivation_pipe_price": self.cultivation_pipe_price.value(),
         }

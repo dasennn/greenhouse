@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -30,6 +32,7 @@ from services.geometry_utils import (
     estimate_gutters_length,
     estimate_koutelou_pairs,
     estimate_plevra,
+    estimate_cultivation_pipes,
 )
 from ui.drawing_view import DrawingView
 from ui.column_height_dialog import ColumnHeightDialog
@@ -619,10 +622,24 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             plevra = None
+        
+        # Σωλήνες Καλλιέργειας (cultivation pipes)
+        cultivation_pipe_length = self.material_settings.get('cultivation_pipe_length', 5.0)
+        try:
+            cultivation_pipes = estimate_cultivation_pipes(
+                xy,
+                grid_w_m=getattr(self.view, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self.view, 'grid_h_m', 3.0),
+                scale_factor=self.view.scale_factor,
+                pipe_length_m=cultivation_pipe_length,
+            )
+        except Exception:
+            cultivation_pipes = None
+        
         est = self._ensure_estimator()
         if est is not None:
             try:
-                bom = est.compute_bom(posts, gutters, koutelou, plevra, grid_h_m=getattr(self.view, 'grid_h_m', 3.0))
+                bom = est.compute_bom(posts, gutters, koutelou, plevra, cultivation_pipes, grid_h_m=getattr(self.view, 'grid_h_m', 3.0))
                 self._update_bom_pane(bom, posts)
             except Exception:
                 pass
@@ -729,77 +746,131 @@ class MainWindow(QMainWindow):
 
     def _show_material_settings(self):
         """Εμφανίζει το dialog προσαρμογής υλικών και αποθηκεύει τις ρυθμίσεις."""
-        dialog = MaterialSettingsDialog(self)
+        dialog = MaterialSettingsDialog(self, current_settings=self.material_settings)
         
-        # Αν υπάρχουν αποθηκευμένες ρυθμίσεις, φόρτωσέ τες στο dialog
-        if self.material_settings:
-            # Μπορείς να προσθέσεις setter methods στο dialog για να φορτώσεις τις τιμές
-            pass
+        # Σύνδεση του signal για άμεση εφαρμογή
+        dialog.settings_changed.connect(self._apply_material_settings)
         
         if dialog.exec() == QDialog.Accepted:
-            # Αποθήκευση ρυθμίσεων
-            self.material_settings = dialog.get_settings()
+            # Αποθήκευση ρυθμίσεων κατά το κλείσιμο με OK
+            settings = dialog.get_settings()
+            self._apply_material_settings(settings)
+    
+    def _apply_material_settings(self, settings):
+        """Εφαρμόζει τις ρυθμίσεις υλικών και ανανεώνει το BOM."""
+        # Αποθήκευση ρυθμίσεων
+        self.material_settings = settings
+        
+        # Ενημέρωση τιμών υλικών στον estimator
+        est = self._ensure_estimator()
+        if est is not None:
+            # Ενημέρωση τιμών και ύψους στύλων
+            if 'post_tall_price' in settings:
+                if 'post_tall' in est.materials:
+                    est.materials['post_tall'].unit_price = settings['post_tall_price']
             
-            # Ενημέρωση τιμών υλικών στον estimator
-            est = self._ensure_estimator()
-            if est is not None:
-                settings = self.material_settings
-                
-                # Ενημέρωση τιμών και ύψους στύλων
-                if 'post_tall_price' in settings:
-                    if 'post_tall' in est.materials:
-                        est.materials['post_tall'].unit_price = settings['post_tall_price']
-                
-                if 'post_tall_height' in settings:
-                    if 'post_tall' in est.materials:
-                        height_m = settings['post_tall_height']
-                        est.materials['post_tall'].height = f"{int(height_m)}m{int((height_m % 1) * 100):02d}"
-                
-                if 'post_low_price' in settings:
-                    if 'post_low' in est.materials:
-                        est.materials['post_low'].unit_price = settings['post_low_price']
-                
-                if 'post_low_height' in settings:
-                    if 'post_low' in est.materials:
-                        height_m = settings['post_low_height']
-                        est.materials['post_low'].height = f"{int(height_m)}m{int((height_m % 1) * 100):02d}"
-                
-                if 'gutter_3m_price' in settings:
-                    if 'gutter_3m' in est.materials:
-                        est.materials['gutter_3m'].unit_price = settings['gutter_3m_price']
-                
-                if 'gutter_4m_price' in settings:
-                    if 'gutter_4m' in est.materials:
-                        est.materials['gutter_4m'].unit_price = settings['gutter_4m_price']
-                
-                # Half gutters (μισές υδρορροές)
-                if 'gutter_3m_price' in settings:
-                    if 'gutter_3m_half' in est.materials:
-                        est.materials['gutter_3m_half'].unit_price = settings['gutter_3m_price'] / 2.0
-                
-                if 'gutter_4m_price' in settings:
-                    if 'gutter_4m_half' in est.materials:
-                        est.materials['gutter_4m_half'].unit_price = settings['gutter_4m_price'] / 2.0
-                
-                if 'koutelou_price' in settings:
-                    if 'koutelou_pair' in est.materials:
-                        est.materials['koutelou_pair'].unit_price = settings['koutelou_price']
-                
-                if 'plevra_price' in settings:
-                    if 'plevra' in est.materials:
-                        est.materials['plevra'].unit_price = settings['plevra_price']
-                
-                if 'ridge_cap_price' in settings:
-                    if 'ridge_cap' in est.materials:
-                        est.materials['ridge_cap'].unit_price = settings['ridge_cap_price']
+            if 'post_tall_height' in settings:
+                if 'post_tall' in est.materials:
+                    height_m = settings['post_tall_height']
+                    est.materials['post_tall'].height = f"{int(height_m)}m{int((height_m % 1) * 100):02d}"
             
-            # Επανυπολογισμός BOM με τις νέες ρυθμίσεις
-            self._recompute_bom_if_possible()
+            if 'post_low_price' in settings:
+                if 'post_low' in est.materials:
+                    est.materials['post_low'].unit_price = settings['post_low_price']
             
-            try:
-                self.statusBar().showMessage("Οι ρυθμίσεις υλικών ενημερώθηκαν.", 3000)
-            except Exception:
-                pass
+            if 'post_low_height' in settings:
+                if 'post_low' in est.materials:
+                    height_m = settings['post_low_height']
+                    est.materials['post_low'].height = f"{int(height_m)}m{int((height_m % 1) * 100):02d}"
+            
+            # Υδρορροές - ενημέρωση τιμής και πάχους
+            if 'gutter_thickness' in settings:
+                gutter_thickness = settings['gutter_thickness']
+                for gutter_code in ['gutter_3m', 'gutter_4m', 'gutter_3m_half', 'gutter_4m_half']:
+                    if gutter_code in est.materials:
+                        est.materials[gutter_code].thickness = gutter_thickness
+            
+            if 'gutter_3m_price' in settings:
+                if 'gutter_3m' in est.materials:
+                    est.materials['gutter_3m'].unit_price = settings['gutter_3m_price']
+            
+            if 'gutter_4m_price' in settings:
+                if 'gutter_4m' in est.materials:
+                    est.materials['gutter_4m'].unit_price = settings['gutter_4m_price']
+            
+            # Half gutters (μισές υδρορροές)
+            if 'gutter_3m_price' in settings:
+                if 'gutter_3m_half' in est.materials:
+                    est.materials['gutter_3m_half'].unit_price = settings['gutter_3m_price'] / 2.0
+            
+            if 'gutter_4m_price' in settings:
+                if 'gutter_4m_half' in est.materials:
+                    est.materials['gutter_4m_half'].unit_price = settings['gutter_4m_price'] / 2.0
+            
+            # Κουτελού - ενημέρωση μήκους, πάχους και τιμής
+            if 'koutelou_length' in settings:
+                if 'koutelou_pair' in est.materials:
+                    length_m = settings['koutelou_length']
+                    est.materials['koutelou_pair'].length = f"{length_m:g}m"
+            
+            if 'koutelou_thickness' in settings:
+                if 'koutelou_pair' in est.materials:
+                    est.materials['koutelou_pair'].thickness = settings['koutelou_thickness']
+            
+            if 'koutelou_price' in settings:
+                if 'koutelou_pair' in est.materials:
+                    est.materials['koutelou_pair'].unit_price = settings['koutelou_price']
+            
+            # Πλευρά - ενημέρωση μήκους, πάχους και τιμής
+            if 'plevra_thickness' in settings:
+                if 'plevra' in est.materials:
+                    est.materials['plevra'].thickness = settings['plevra_thickness']
+            
+            if 'plevra_length' in settings:
+                if 'plevra' in est.materials:
+                    length_m = settings['plevra_length']
+                    est.materials['plevra'].length = f"{length_m:g}m"
+            
+            if 'plevra_price' in settings:
+                if 'plevra' in est.materials:
+                    est.materials['plevra'].unit_price = settings['plevra_price']
+            
+            # Κορφιάτες - ενημέρωση πάχους και τιμής
+            if 'ridge_thickness' in settings:
+                if 'ridge_cap' in est.materials:
+                    est.materials['ridge_cap'].thickness = settings['ridge_thickness']
+            
+            if 'ridge_price' in settings:
+                if 'ridge_cap' in est.materials:
+                    est.materials['ridge_cap'].unit_price = settings['ridge_price']
+            
+            # Σωλήνες Καλλιέργειας - ενημέρωση πάχους, μήκους και τιμής
+            if 'cultivation_thickness' in settings:
+                cultivation_thickness = settings['cultivation_thickness']
+                for pipe_code in ['cultivation_pipe_left', 'cultivation_pipe_middle', 'cultivation_pipe_right']:
+                    if pipe_code in est.materials:
+                        est.materials[pipe_code].thickness = cultivation_thickness
+            
+            if 'cultivation_pipe_length' in settings:
+                length_m = settings['cultivation_pipe_length']
+                length_str = f"{length_m:g}m"
+                for pipe_code in ['cultivation_pipe_left', 'cultivation_pipe_middle', 'cultivation_pipe_right']:
+                    if pipe_code in est.materials:
+                        est.materials[pipe_code].length = length_str
+            
+            if 'cultivation_pipe_price' in settings:
+                price = settings['cultivation_pipe_price']
+                for pipe_code in ['cultivation_pipe_left', 'cultivation_pipe_middle', 'cultivation_pipe_right']:
+                    if pipe_code in est.materials:
+                        est.materials[pipe_code].unit_price = price
+        
+        # Επανυπολογισμός BOM με τις νέες ρυθμίσεις
+        self._recompute_bom_if_possible()
+        
+        try:
+            self.statusBar().showMessage("Οι ρυθμίσεις υλικών ενημερώθηκαν.", 3000)
+        except Exception:
+            pass
 
     def _export_shape_debug(self):
         """Export current shape to JSON for debugging and analysis."""
@@ -1589,10 +1660,24 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             plevra = None
+        
+        # Σωλήνες Καλλιέργειας (cultivation pipes)
+        cultivation_pipe_length = self.material_settings.get('cultivation_pipe_length', 5.0)
+        try:
+            cultivation_pipes = estimate_cultivation_pipes(
+                xy,
+                grid_w_m=getattr(self.view, 'grid_w_m', 5.0),
+                grid_h_m=getattr(self.view, 'grid_h_m', 3.0),
+                scale_factor=self.view.scale_factor,
+                pipe_length_m=cultivation_pipe_length,
+            )
+        except Exception:
+            cultivation_pipes = None
+        
         est = self._ensure_estimator()
         if est is not None:
             try:
-                bom = est.compute_bom(posts, gutters, koutelou, plevra, grid_h_m=getattr(self.view, 'grid_h_m', 3.0))
+                bom = est.compute_bom(posts, gutters, koutelou, plevra, cultivation_pipes, grid_h_m=getattr(self.view, 'grid_h_m', 3.0))
                 self._update_bom_pane(bom, posts)
             except Exception:
                 pass

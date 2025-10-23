@@ -1,5 +1,7 @@
 """Drawing view for greenhouse design."""
 
+from __future__ import annotations
+
 import math
 from PySide6.QtWidgets import (
     QGraphicsView,

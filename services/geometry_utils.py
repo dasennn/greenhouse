@@ -20,6 +20,7 @@ from services.geometry import (
     estimate_gutters_length,
     estimate_koutelou_pairs,
     estimate_plevra,
+    estimate_cultivation_pipes,
 )
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     'estimate_gutters_length',
     'estimate_koutelou_pairs',
     'estimate_plevra',
+    'estimate_cultivation_pipes',
 ]
