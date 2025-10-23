@@ -250,6 +250,13 @@ class MainWindow(QMainWindow):
             act.triggered.connect(handler)
             self.toolbar.addAction(act)
 
+        # Κουμπί Προσανατολισμός Πλευρών
+        self.toolbar.addSeparator()
+        self.facade_btn = QAction("Προσανατολισμός Πλευρών", self)
+        self.facade_btn.setEnabled(False)  # Ενεργοποιείται μετά το κλείσιμο
+        self.facade_btn.triggered.connect(self._show_facade_dialog)
+        self.toolbar.addAction(self.facade_btn)
+
         # Presets: label -> (grid_w_m, grid_h_m) (kept for New Project dialog and status mapping)
         self._grid_presets = {
             "5x3": (5.0, 3.0),
@@ -271,6 +278,37 @@ class MainWindow(QMainWindow):
             self.view.zoom_to_drawing()
         except Exception:
             pass
+    
+    def _show_facade_dialog(self):
+        """Εμφάνιση dialog προσανατολισμών."""
+        from ui.facade_orientation_dialog import FacadeOrientationDialog
+        
+        segments = self.view.state.facade_segments
+        if not segments:
+            QMessageBox.information(
+                self,
+                "Προσανατολισμός Πλευρών",
+                "Δεν υπάρχουν δεδομένα προσανατολισμού. Κλείσε πρώτα την περίμετρο."
+            )
+            return
+        # Ενεργοποίησε την εμφάνιση χρωμάτων προσανατολισμού μόνο όταν πατηθεί το κουμπί
+        try:
+            self.view.state.show_facade_colors = True
+            self.view.perimeter_manager.refresh_perimeter()
+        except Exception:
+            pass
+        
+        dialog = FacadeOrientationDialog(segments, self.view.scale_factor, self)
+        
+        # Σύνδεση signal για highlight
+        dialog.row_selected.connect(self.view.highlight_facade_segment)
+        dialog.finished.connect(lambda: self.view.clear_highlight())
+        
+        if dialog.exec() == QDialog.Accepted:
+            # Ενημέρωση segments
+            updated = dialog.get_updated_segments()
+            self.view.update_facade_segments(updated)
+            self._mark_dirty()
 
     def _create_bom_dock(self):
         self.bom_dock = QDockWidget("Υπολογισμός Κόστους Υλικών", self)
@@ -660,6 +698,12 @@ class MainWindow(QMainWindow):
         # Mark project as modified due to geometry change
         try:
             self._mark_dirty()
+        except Exception:
+            pass
+        
+        # Ενεργοποίηση κουμπιού προσανατολισμού
+        try:
+            self.facade_btn.setEnabled(True)
         except Exception:
             pass
 

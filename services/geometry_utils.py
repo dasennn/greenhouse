@@ -14,7 +14,8 @@ Please import from services.geometry or services.geometry.* instead.
 from services.geometry import (
     compute_grid_coverage,
     compute_grid_box_counts,
-    find_north_south_chains,
+    analyze_facade_orientations,
+    group_facade_segments,
     estimate_triangle_posts_3x5_with_sides,
     estimate_triangle_posts_3x5_with_sides_per_row,
     estimate_gutters_length,
@@ -26,7 +27,8 @@ from services.geometry import (
 __all__ = [
     'compute_grid_coverage',
     'compute_grid_box_counts',
-    'find_north_south_chains',
+    'analyze_facade_orientations',
+    'group_facade_segments',
     'estimate_triangle_posts_3x5_with_sides',
     'estimate_triangle_posts_3x5_with_sides_per_row',
     'estimate_gutters_length',

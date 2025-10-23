@@ -7,7 +7,7 @@ based on greenhouse dimensions and grid layout.
 from typing import List, Tuple, Optional, Dict
 import math
 
-from .segment_analysis import find_north_south_chains
+from .segment_analysis import group_facade_segments
 
 
 def estimate_gutters_length(
@@ -47,9 +47,9 @@ def estimate_gutters_length(
         return None
 
     pts = [(float(x), float(y)) for x, y in points]
-    ns = find_north_south_chains(pts)
-    north = ns.get("north") if ns else None
-    south = ns.get("south") if ns else None
+    groups = group_facade_segments(pts)
+    north = groups.get("Βόρεια") if groups else None
+    south = groups.get("Νότια") if groups else None
     if not north or not south:
         return None
 

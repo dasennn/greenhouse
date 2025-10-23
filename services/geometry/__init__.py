@@ -16,7 +16,10 @@ from .polygon_coverage import (
     compute_grid_box_counts,
 )
 from .segment_analysis import (
-    find_north_south_chains,
+    analyze_facade_orientations,
+    get_facade_color,
+    FACADE_COLOR_MAP,
+    group_facade_segments,
 )
 from .post_estimation import (
     estimate_triangle_posts_3x5_with_sides,
@@ -45,7 +48,10 @@ __all__ = [
     'compute_grid_coverage',
     'compute_grid_box_counts',
     # Segment analysis
-    'find_north_south_chains',
+    'analyze_facade_orientations',
+    'group_facade_segments',
+    'get_facade_color',
+    'FACADE_COLOR_MAP',
     # Post estimation
     'estimate_triangle_posts_3x5_with_sides',
     'estimate_triangle_posts_3x5_with_sides_per_row',

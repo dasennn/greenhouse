@@ -8,102 +8,138 @@ from typing import List, Tuple, Optional, Dict
 import math
 
 
-def find_north_south_chains(points: List[Tuple[float, float]]) -> Dict[str, List[Dict]]:
-    """
-    Analyzes a polygon to find its "north", "south", "east", and "west" segments.
-
-    This method identifies segments based on their orientation and position:
-    - North: Roughly horizontal segments in the upper half of the shape
-    - South: Roughly horizontal segments in the lower half of the shape
-    - East: Roughly vertical segments in the right half of the shape
-    - West: Roughly vertical segments in the left half of the shape
-
-    Args:
-        points: A list of (x, y) tuples defining the vertices of the polygon.
-
-    Returns:
-        A dictionary with four keys: "north", "south", "east", "west", each containing
-        a list of segment dictionaries for that orientation.
-    """
-    if not points or len(points) < 3:
-        return {"north": [], "south": [], "east": [], "west": []}
-
+def _build_segments(points: List[Tuple[float, float]]) -> List[Dict]:
+    """Create basic segments with p1, p2, midpoint, length, angle (screen coords)."""
     pts = [(float(x), float(y)) for x, y in points]
-    n = len(pts)
-
-    # Helper to create a segment dictionary
-    def create_segment(p1_idx, p2_idx):
-        x1, y1 = pts[p1_idx]
-        x2, y2 = pts[p2_idx]
-        angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
-        return {
+    if len(pts) < 2:
+        return []
+    # Ensure closed polygon for consistent iteration
+    if pts[0] != pts[-1]:
+        pts.append(pts[0])
+    segs: List[Dict] = []
+    for i in range(len(pts) - 1):
+        x1, y1 = pts[i]
+        x2, y2 = pts[i + 1]
+        angle = math.degrees(math.atan2(y2 - y1, x2 - x1))  # screen coords (Y down)
+        segs.append({
             "p1": (x1, y1),
             "p2": (x2, y2),
-            "midpoint": ((x1 + x2) / 2, (y1 + y2) / 2),
-            "length": math.sqrt((x2 - x1)**2 + (y2 - y1)**2),
-            "angle": angle
-        }
+            "midpoint": ((x1 + x2) / 2.0, (y1 + y2) / 2.0),
+            "length": math.hypot(x2 - x1, y2 - y1),
+            "angle": angle,
+        })
+    return segs
 
-    # Create all segments
-    all_segments = []
-    for i in range(n):
-        next_idx = (i + 1) % n
-        # Skip if it's a duplicate closing edge
-        if i == n - 1 and pts[0] == pts[-1]:
-            continue
-        all_segments.append(create_segment(i, next_idx))
 
-    if not all_segments:
-        return {"north": [], "south": [], "east": [], "west": []}
+def group_facade_segments(points: List[Tuple[float, float]]) -> Dict[str, List[Dict]]:
+    """
+    Single source of truth: classify each segment into facade orientation groups
+    using screen coordinates (Y increases downward).
 
-    # Find the center of the shape
-    all_x_coords = [p[0] for p in pts]
-    all_y_coords = [p[1] for p in pts]
-    x_center = (min(all_x_coords) + max(all_x_coords)) / 2
-    y_center = (min(all_y_coords) + max(all_y_coords)) / 2
+    Rules:
+    - Roughly horizontal: abs(angle) <= 45 or >= 135
+      • Above center (smaller y): Βόρεια (top facade)
+      • Below center (larger y): Νότια (bottom facade)
+    - Roughly vertical: 45 < abs(angle) < 135
+      • Right of center (x >= center): Ανατολική (right side)
+      • Left of center (x < center): Δυτική (left side)
+    """
+    if not points or len(points) < 3:
+        return {"Βόρεια": [], "Νότια": [], "Ανατολική": [], "Δυτική": []}
 
-    # Classify segments based on angle and position
-    north_segments = []
-    south_segments = []
-    east_segments = []
-    west_segments = []
-    
-    for seg in all_segments:
+    pts = [(float(x), float(y)) for x, y in points]
+    segs = _build_segments(pts)
+    if not segs:
+        return {"Βόρεια": [], "Νότια": [], "Ανατολική": [], "Δυτική": []}
+
+    xs = [x for x, _ in pts]
+    ys = [y for _, y in pts]
+    x_center = (min(xs) + max(xs)) / 2.0
+    y_center = (min(ys) + max(ys)) / 2.0
+
+    groups: Dict[str, List[Dict]] = {"Βόρεια": [], "Νότια": [], "Ανατολική": [], "Δυτική": []}
+    for seg in segs:
         angle = seg["angle"]
-        midpoint_x = seg["midpoint"][0]
-        midpoint_y = seg["midpoint"][1]
-        
-        # Normalize angle to [-180, 180]
+        # Normalize to [-180, 180]
         while angle > 180:
             angle -= 360
         while angle < -180:
             angle += 360
-        
-        # Classify based on angle:
-        # Horizontal: -45° to 45° or 135° to 180° or -180° to -135°
-        # Vertical: 45° to 135° or -135° to -45°
-        
+        mx, my = seg["midpoint"]
         is_horizontal = (abs(angle) <= 45) or (abs(angle) >= 135)
         is_vertical = (45 < abs(angle) < 135)
-        
         if is_horizontal:
-            if midpoint_y < y_center:
-                # Upper half = North
-                north_segments.append(seg)
+            if my <= y_center:
+                groups["Βόρεια"].append(seg)
             else:
-                # Lower half = South
-                south_segments.append(seg)
+                groups["Νότια"].append(seg)
         elif is_vertical:
-            if midpoint_x >= x_center:
-                # Right half = East
-                east_segments.append(seg)
+            if mx >= x_center:
+                groups["Ανατολική"].append(seg)
             else:
-                # Left half = West
-                west_segments.append(seg)
+                groups["Δυτική"].append(seg)
+    return groups
 
+
+# ---------------------------------------------------------------------------
+# Facade orientation analysis (Βόρεια, Νότια, Ανατολική, Δυτική)
+# ---------------------------------------------------------------------------
+
+FACADE_COLOR_MAP: Dict[str, str] = {
+    "Ανατολική": "#8E24AA",  # � Μωβ (καλύτερη αντίθεση από κίτρινο)
+    "Βόρεια": "#0077FF",     # 🔵 Μπλε (top)
+    "Νότια": "#E53935",      # 🔴 Κόκκινο (bottom)
+    "Δυτική": "#2E7D32",     # 🟢 Πράσινο
+}
+
+
+def analyze_facade_orientations(points: List[Tuple[float, float]]) -> List[Dict]:
+    """Return per-segment orientations using the unified facade logic.
+
+    Each returned dict includes: index, start, end, angle, length, orientation, color.
+    Orientation is one of: "Βόρεια", "Νότια", "Ανατολική", "Δυτική".
+    """
+    if not points or len(points) < 2:
+        return []
+    segs = _build_segments(points)
+    groups = group_facade_segments(points)
+    # Map id by start-end to orientation for quick lookup
+    def key(seg: Dict) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+        return (tuple(seg["p1"]), tuple(seg["p2"]))
+    orient_map: Dict[Tuple[Tuple[float, float], Tuple[float, float]], str] = {}
+    for ori, lst in groups.items():
+        for s in lst:
+            orient_map[key(s)] = ori
+    result: List[Dict] = []
+    for idx, s in enumerate(segs):
+        ori = orient_map.get(key(s))
+        if not ori:
+            # Should not happen, but default to Δυτική neutral color
+            ori = "Δυτική"
+        result.append({
+            "index": idx,
+            "start": list(s["p1"]),
+            "end": list(s["p2"]),
+            "angle": round(s["angle"], 1),
+            "length": float(s["length"]),
+            "orientation": ori,
+            "color": FACADE_COLOR_MAP.get(ori, "#5F6368"),
+        })
+    return result
+
+
+def get_facade_color(orientation: str) -> str:
+    """Επιστρέφει το χρώμα για έναν προσανατολισμό."""
+    return FACADE_COLOR_MAP.get(orientation, "#5F6368")
+
+# NOTE: Legacy helper kept temporarily for compatibility in documentation only.
+# Do not use in new code. Use group_facade_segments/analyze_facade_orientations.
+def find_north_south_chains(points: List[Tuple[float, float]]) -> Dict[str, List[Dict]]:
+    groups = group_facade_segments(points)
+    # Convert to legacy keys used in older modules if still referenced
     return {
-        "north": north_segments,
-        "south": south_segments,
-        "east": east_segments,
-        "west": west_segments
+        "north": groups.get("Βόρεια", []),
+        "south": groups.get("Νότια", []),
+        "east": groups.get("Ανατολική", []),
+        "west": groups.get("Δυτική", []),
     }

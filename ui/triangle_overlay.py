@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QGraphicsScene, QGraphicsItem, QGraphicsPolygonIte
 from PySide6.QtGui import QPen, QColor, QBrush, QPolygonF
 from PySide6.QtCore import Qt, QPointF
 
-from services.geometry_utils import find_north_south_chains
+from services.geometry import group_facade_segments
 
 
 class TriangleOverlayManager:
@@ -41,44 +41,14 @@ class TriangleOverlayManager:
         if len(points) < 3:
             return
         
-        # Resolve north horizontal segment
+        # Resolve Βόρεια (top) horizontal chain
         pts = [(p.x(), p.y()) for p in points]
-        ns = find_north_south_chains(pts)
-        if not ns or not ns["north"]:
+        groups = group_facade_segments(pts)
+        north_chain = groups.get("Βόρεια") if groups else None
+        if not north_chain:
             return
 
-        # DEBUG VISUALIZATION: Draw the north chain in RED and south chain in BLUE
-        # Note: pts are already in pixel coordinates from QPointF.x() and .y()
-        
-        # Draw NORTH chain in RED (thick line)
-        north_chain = ns["north"]
-        if north_chain:
-            for seg in north_chain:
-                p1 = seg['p1']
-                p2 = seg['p2']
-                # Points are already in pixels, no need to scale
-                x1, y1 = p1[0], p1[1]
-                x2, y2 = p2[0], p2[1]
-                
-                line_item = self.scene.addLine(x1, y1, x2, y2, QPen(QColor(255, 0, 0), 5))
-                line_item.setZValue(1000)  # High z-value to draw on top
-                self.tri_items.append(line_item)
-        
-        # Draw SOUTH chain in BLUE (thick line)
-        south_chain = ns["south"]
-        if south_chain:
-            for seg in south_chain:
-                p1 = seg['p1']
-                p2 = seg['p2']
-                # Points are already in pixels, no need to scale
-                x1, y1 = p1[0], p1[1]
-                x2, y2 = p2[0], p2[1]
-                
-                line_item = self.scene.addLine(x1, y1, x2, y2, QPen(QColor(0, 0, 255), 5))
-                line_item.setZValue(1000)  # High z-value to draw on top
-                self.tri_items.append(line_item)
-
-        # The "north" chain is now a list of segments.
+        # The Βόρεια chain is now a list of segments.
         # We need to find the overall start and end points of the chain.
         if not north_chain:
             return
@@ -95,7 +65,7 @@ class TriangleOverlayManager:
         start_point = unique_points[0]
         end_point = unique_points[-1]
 
-        # Create a main segment representing the general direction of the north chain
+        # Create a main segment representing the general direction of the Βόρεια chain
         main_segment = {
             "p1": start_point,
             "p2": end_point,

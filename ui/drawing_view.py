@@ -285,8 +285,6 @@ class DrawingView(QGraphicsView):
         # Append starting point to close the loop explicitly
         self.state.points.append(QPointF(self.state.points[0]))
 
-        self.perimeter_manager.refresh_perimeter()
-
         # compute perimeter and area
         perimeter_m = 0.0
         for i in range(1, len(self.state.points)):
@@ -383,6 +381,11 @@ class DrawingView(QGraphicsView):
             "posts": est if 'est' in locals() else None,
             "gutters": gut if 'gut' in locals() else None,
         }
+        
+        # 🔥 ΥΠΟΛΟΓΙΣΜΟΣ ΠΡΟΣΑΝΑΤΟΛΙΣΜΩΝ (μετά το κλείσιμο)
+        from services.geometry.segment_analysis import analyze_facade_orientations
+        self.state.facade_segments = analyze_facade_orientations(pts)
+        
         # Trigger repaint to show overlay
         try:
             self.viewport().update()
@@ -398,6 +401,10 @@ class DrawingView(QGraphicsView):
 
         self.state.perimeter_locked = True
         self.toggle_pointer_mode(True)
+        
+        # Ανανέωση για χρωματισμό
+        self.perimeter_manager.refresh_perimeter()
+        
         self.perimeter_closed.emit(list(self.state.points), perimeter_m, area_m2, partial_details)
 
     def _commit_dimensional_segment(self, length_m: float, alt_held: bool):
@@ -1401,3 +1408,21 @@ class DrawingView(QGraphicsView):
         QMessageBox.information(self, "Grid Coverage", msg)
 
     # Coverage helpers now live in services.geometry_utils.
+
+    # ------------------------------------------------------------------
+    # Facade orientation helpers
+    # ------------------------------------------------------------------
+    
+    def highlight_facade_segment(self, index: int):
+        """Τονίζει ένα segment με βάση το index."""
+        self.perimeter_manager.highlight_segment(index)
+    
+    def clear_highlight(self):
+        """Καθαρίζει το highlight."""
+        self.perimeter_manager._clear_highlight()
+    
+    def update_facade_segments(self, segments):
+        """Ενημερώνει τα facade segments και ανανεώνει το σχέδιο."""
+        self.state.facade_segments = segments
+        self.perimeter_manager.refresh_perimeter()
+

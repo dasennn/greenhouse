@@ -40,6 +40,11 @@ class DrawingState:
         # Overlay data
         self._overlay_data = None
         self.show_overlay = False
+        
+        # Facade orientation data (μετά το κλείσιμο περιμέτρου)
+        self.facade_segments: List[dict] = []
+        # Εμφάνιση χρωμάτων προσανατολισμού μόνο κατ' επιλογή (κουμπί "Προσανατολισμός Πλευρών")
+        self.show_facade_colors: bool = False
     
     def save_state(self):
         """Save current state for undo/redo."""
@@ -48,6 +53,7 @@ class DrawingState:
             "guides": list(self.guides),
             "breaks": list(self.breaks),
             "start_new_chain_pending": bool(self.start_new_chain_pending),
+            "facade_segments": list(self.facade_segments),
         }
         self.history.append(state)
         self.future.clear()
@@ -58,6 +64,7 @@ class DrawingState:
         self.guides = list(state["guides"])
         self.breaks = list(state.get("breaks", []))
         self.start_new_chain_pending = bool(state.get("start_new_chain_pending", False))
+        self.facade_segments = list(state.get("facade_segments", []))
     
     def can_undo(self) -> bool:
         return len(self.history) >= 2
@@ -90,3 +97,5 @@ class DrawingState:
         self._guide_start = None
         self._dim_input = ""
         self._overlay_data = None
+        self.facade_segments.clear()
+        self.show_facade_colors = False

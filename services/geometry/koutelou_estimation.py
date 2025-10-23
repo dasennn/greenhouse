@@ -7,7 +7,7 @@ needed for north and south facades of greenhouse structures.
 from typing import List, Tuple, Optional, Dict
 import math
 
-from .segment_analysis import find_north_south_chains
+from .segment_analysis import group_facade_segments
 
 
 def estimate_koutelou_pairs(
@@ -53,13 +53,12 @@ def estimate_koutelou_pairs(
         return None
 
     pts = [(float(x), float(y)) for x, y in points]
-    ns = find_north_south_chains(pts)
-    
-    if not ns:
+    groups = group_facade_segments(pts)
+    if not groups:
         return None
 
-    north = ns.get("north", [])
-    south = ns.get("south", [])
+    north = groups.get("Βόρεια", [])
+    south = groups.get("Νότια", [])
 
     if not north or not south:
         return None
